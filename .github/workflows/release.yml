@@ -1,0 +1,52 @@
+name: Build and publish fork preview
+on:
+  push:
+    branches: [codex/health-check-safe-restore]
+    paths: [release/release.json]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fork-preview-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'mutsuki14/DLSS-5-MANAGER' && github.ref == 'refs/heads/codex/health-check-safe-restore'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build, package and verify Windows installer
+        shell: pwsh
+        run: ./release/build-windows.ps1
+      - name: Retain verified release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: artifacts/assets/*
+          if-no-files-found: error
+          retention-days: 30
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release-assets
+          path: release-assets
+      - name: Publish verified assets in the fork
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./release/publish-release.ps1 -AssetsDirectory ./release-assets

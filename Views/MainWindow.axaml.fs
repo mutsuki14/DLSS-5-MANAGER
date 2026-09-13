@@ -273,120 +273,6 @@ type MainWindow() as this =
         | :? MainViewModel as vm -> vm.ShowEmulators()
         | _ -> ()
 
-    // =====================================================================
-    // COMMUNITY
-    // =====================================================================
-    member this.OnTabCommunityClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.ShowCommunity()
-        | _ -> ()
-
-    member this.OnCommunityTutorialsClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> this.OpenExternal(vm.Community.TutorialsUrl)
-        | _ -> ()
-
-    member this.OnCommunityRefreshClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.Refresh()
-        | _ -> ()
-
-    /// The filter chips carry their value in Tag, so one handler serves the
-    /// whole row and adding a route later is a line of XAML.
-    member this.OnCommunityRouteClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            vm.Community.SetRouteFilter(if isNull ctrl.Tag then "" else string ctrl.Tag)
-        | _ -> ()
-
-    member this.OnCommunityResultClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            vm.Community.SetResultFilter(if isNull ctrl.Tag then "" else string ctrl.Tag)
-        | _ -> ()
-
-    member this.OnCommunityClaimNameClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.ClaimName()
-        | _ -> ()
-
-    member this.OnCommunityGameClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            match ctrl.DataContext with
-            | :? CommunityGameViewModel as game -> vm.Community.OpenGame(game)
-            | _ -> ()
-        | _ -> ()
-
-    member this.OnCommunitySheetCloseClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.CloseSheet()
-        | _ -> ()
-
-    member this.OnCommunitySheetRouteClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            vm.Community.SetSheetRoute(if isNull ctrl.Tag then "" else string ctrl.Tag)
-        | _ -> ()
-
-    member this.OnCommunityCommentsClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            match ctrl.DataContext with
-            | :? CommunityReportViewModel as report -> vm.Community.ToggleComments(report)
-            | _ -> ()
-        | _ -> ()
-
-    member this.OnCommunityReplyClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            match ctrl.DataContext with
-            | :? CommunityReportViewModel as report -> vm.Community.SendReply(report)
-            | _ -> ()
-        | _ -> ()
-
-    /// The five emoji buttons share a handler; Tag holds the slot number the
-    /// server stores the count in.
-    member this.OnCommunityReactClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            match ctrl.DataContext, Int32.TryParse(string ctrl.Tag) with
-            | (:? CommunityReportViewModel as report), (true, slot) -> vm.Community.React(report, slot)
-            | _ -> ()
-        | _ -> ()
-
-    // ---- the composer ---------------------------------------------------
-    member this.OnShareToCommunityClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.ShareToCommunity()
-        | _ -> ()
-
-    member this.OnComposerCloseClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.CloseComposer()
-        | _ -> ()
-
-    member this.OnComposerStatusClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext, sender with
-        | (:? MainViewModel as vm), (:? Control as ctrl) ->
-            vm.Community.SetComposeStatus(if isNull ctrl.Tag then "working" else string ctrl.Tag)
-        | _ -> ()
-
-    member this.OnComposerDetectSpecsClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.DetectSpecs()
-        | _ -> ()
-
-    member this.OnComposerClearSpecsClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.ClearSpecs()
-        | _ -> ()
-
-    member this.OnComposerPostClicked(sender: obj, e: RoutedEventArgs) =
-        match this.DataContext with
-        | :? MainViewModel as vm -> vm.Community.SubmitReport()
-        | _ -> ()
-
     /// Emulator cards do not drag or reorder, so a plain release opens them.
     member this.OnEmulatorCardPressed(sender: obj, e: PointerReleasedEventArgs) =
         match this.DataContext, sender with
@@ -829,6 +715,75 @@ type MainWindow() as this =
             |> Async.StartImmediate
         | _ -> ()
 
+    member this.OnImportRuntimePackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady ->
+            async {
+                try
+                    let fileType = FilePickerFileType("033 runtime package (*.zip)", Patterns = [|"*.zip"|])
+                    let options = FilePickerOpenOptions(Title = "导入运行包 / Import runtime package", AllowMultiple = false, FileTypeFilter = [|fileType|])
+                    let! files = this.StorageProvider.OpenFilePickerAsync(options) |> Async.AwaitTask
+                    if files <> null && files.Count > 0 then vm.ImportRuntimePackage(files.[0].Path.LocalPath)
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not open package: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
+    member this.OnRecommendPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.PreviewRuntimePackage(true)
+        | _ -> ()
+
+    member this.OnPreviewPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.PreviewRuntimePackage(false)
+        | _ -> ()
+
+    member this.OnConfirmPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.ConfirmRuntimePackage()
+        | _ -> ()
+
+    member this.OnHealthCheckClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.RunHealthCheck()
+        | _ -> ()
+
+    member this.OnImportRulesClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady ->
+            async {
+                try
+                    let fileType = FilePickerFileType("033 game rules (*.json)", Patterns = [|"*.json"|])
+                    let options = FilePickerOpenOptions(Title = vm.Loc.ImportRules, AllowMultiple = false, FileTypeFilter = [|fileType|])
+                    let! files = this.StorageProvider.OpenFilePickerAsync(options) |> Async.AwaitTask
+                    if files <> null && files.Count > 0 then vm.ImportGameRules(files.[0].Path.LocalPath)
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not open rules: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
+    member this.OnExportHealthClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady && vm.HasHealthReport ->
+            let report = vm.HealthReport
+            async {
+                try
+                    let options = FilePickerSaveOptions(Title = vm.Loc.ExportHealth, SuggestedFileName = "dlss5-health.txt", DefaultExtension = "txt")
+                    let! file = this.StorageProvider.SaveFilePickerAsync(options) |> Async.AwaitTask
+                    if file <> null then
+                        use! stream = file.OpenWriteAsync() |> Async.AwaitTask
+                        stream.SetLength(0L)
+                        use writer = new System.IO.StreamWriter(stream, System.Text.UTF8Encoding(false))
+                        do! writer.WriteAsync(report) |> Async.AwaitTask
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not export report: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
     member this.OnInstallDlssClicked(sender: obj, e: RoutedEventArgs) =
         match this.DataContext with
         | :? MainViewModel as vm -> vm.StartInstall()
@@ -905,4 +860,20 @@ type MainWindow() as this =
     member this.OnSetSidebarLayout(sender: obj, e: RoutedEventArgs) =
         match this.DataContext with
         | :? MainViewModel as vm -> vm.SetLayoutMode(true)
+        | _ -> ()
+
+    member this.OnRefreshOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.RefreshOnlineVersions() | _ -> ()
+    member this.OnDownloadOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.DownloadOnlineComponent() | _ -> ()
+    member this.OnPreviewOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.PreviewOnlineComponents() | _ -> ()
+    member this.OnCancelOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.CancelOnline() | _ -> ()
+    member this.OnRemoveOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext, sender with
+        | (:? MainViewModel as vm), (:? Control as control) when vm.IsManageReady ->
+            match control.DataContext with
+            | :? DLSS_5_MANAGER.Services.ComponentReleases.Cached as cached -> vm.OnlineComponents.Remove(cached)
+            | _ -> ()
         | _ -> ()

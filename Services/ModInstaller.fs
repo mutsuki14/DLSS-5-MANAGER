@@ -27,11 +27,7 @@ module ModInstaller =
     // =====================================================================
     // MANIFEST MODEL
     // =====================================================================
-    [<CLIMutable>]
-    type InstalledFile =
-        { TargetPath: string
-          BackupPath: string
-          WasExisting: bool }
+    type InstalledFile = DeploymentSafety.InstalledFile
 
     [<CLIMutable>]
     type InstallManifest =
@@ -212,8 +208,8 @@ module ModInstaller =
             if String.IsNullOrWhiteSpace(dir) || not (Directory.Exists(dir)) then
                 false
             else
-                let probe = Path.Combine(dir, ".dlss5manager-write-test")
-                use _ = File.Create(probe, 1, FileOptions.DeleteOnClose)
+                let probe = Path.Combine(dir, ".dlss5manager-" + Guid.NewGuid().ToString("N") + ".tmp")
+                use _ = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)
                 true
         with _ ->
             false
@@ -229,55 +225,7 @@ module ModInstaller =
     // =====================================================================
     // FILE OPERATIONS (always backed up)
     // =====================================================================
-    /// Tracks every file the installer touches.
-    ///
-    /// `known` is seeded from a previous manifest, so repairing an install never
-    /// mistakes our own already-deployed file for an original game file - which
-    /// would otherwise poison the backup and break uninstall.
-    type private Tracker(backupDir: string, prior: InstalledFile[]) =
-        let entries = Dictionary<string, InstalledFile>(StringComparer.OrdinalIgnoreCase)
-        let addedThisRun = List<InstalledFile>()
-
-        do
-            if not (isNull (box prior)) then
-                for entry in prior do
-                    if not (String.IsNullOrWhiteSpace(entry.TargetPath)) then
-                        entries.[entry.TargetPath] <- entry
-
-        member _.Entries = entries.Values |> Seq.toArray
-        member _.AddedThisRun = addedThisRun
-
-        /// Remembers a file created by an external tool (the ReShade setup).
-        member _.Record(target: string, existedBefore: bool, backupPath: string) =
-            if not (entries.ContainsKey(target)) then
-                let entry =
-                    { TargetPath = target
-                      BackupPath = backupPath
-                      WasExisting = existedBefore }
-
-                entries.[target] <- entry
-                addedThisRun.Add(entry)
-
-        /// Copies one of our payload files over a target, backing up an original once.
-        member this.Copy(source: string, target: string) =
-            if entries.ContainsKey(target) then
-                // Already ours from an earlier run - overwrite, keep the original backup.
-                Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
-                File.Copy(source, target, true)
-            else
-                let wasExisting = File.Exists(target)
-                let mutable backupPath = ""
-
-                if wasExisting then
-                    // Flat backup names keep us clear of the 260 character path limit.
-                    backupPath <- Path.Combine(backupDir, shortHash target + "_" + Path.GetFileName(target))
-
-                    if not (File.Exists(backupPath)) then
-                        File.Copy(target, backupPath, false)
-
-                Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
-                File.Copy(source, target, true)
-                this.Record(target, wasExisting, backupPath)
+    type private Tracker = DeploymentSafety.Tracker
 
     // =====================================================================
     // DLSS 5 PRESENCE & COMPLETENESS
@@ -1006,6 +954,17 @@ module ModInstaller =
               Missing = [| "Game executable" |]
               ManagedByApp = managed
               DlssnrLocations = [||] }
+        elif (installedMode game).StartsWith("package:", StringComparison.Ordinal) then
+            try
+                let manifest = JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(manifestPath game))
+                if not (String.Equals(Path.GetFullPath(manifest.ExecutablePath), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) then invalidOp "Restore point belongs to a different executable."
+                let roots = [|game.InstallDirectory; Path.GetDirectoryName(exePath)|] |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let missing = [| for file in manifest.Files do
+                                    DeploymentSafety.validatePath roots file.TargetPath
+                                    if not (File.Exists(file.TargetPath)) then yield file.TargetPath |]
+                { Present = true; Complete = missing.Length = 0; Missing = missing; ManagedByApp = true
+                  DlssnrLocations = manifest.Files |> Array.filter (fun f -> Path.GetFileName(f.TargetPath) = dlssnrFileName && File.Exists(f.TargetPath)) |> Array.map (fun f -> Path.GetDirectoryName(f.TargetPath)) }
+            with ex -> { Present = true; Complete = false; Missing = [|ex.Message|]; ManagedByApp = true; DlssnrLocations = [||] }
         else
             let exeDir = Path.GetDirectoryName(exePath)
             let dlssDirs = if isNull (box dlssDirs) then [||] else dlssDirs
@@ -1167,22 +1126,15 @@ module ModInstaller =
 
     /// Clears proxies a previous OptiScaler install left behind, so the new one
     /// cannot end up hooked twice under two different names.
-    let private clearStaleOptiScalerHooks (dir: string) : int =
+    let private clearStaleOptiScalerHooks (tracker: Tracker) (dir: string) : int =
         let mutable cleared = 0
 
         for name in Array.append optiScalerSlots [| "OptiScaler.asi"; "Remove_OptiScaler.bat"; "Remove OptiScaler.bat" |] do
             let p = Path.Combine(dir, name)
 
-            let removable =
-                name.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) && File.Exists(p)
-                || isOptiScalerProxy p
-
-            if removable then
-                try
-                    File.Delete(p)
-                    cleared <- cleared + 1
-                with _ ->
-                    ()
+            if isOptiScalerProxy p then
+                tracker.Delete(p)
+                cleared <- cleared + 1
 
         cleared
 
@@ -1194,7 +1146,7 @@ module ModInstaller =
 
         order
         |> Array.tryFind (fun n -> not (File.Exists(Path.Combine(dir, n))))
-        |> Option.defaultValue order.[0]
+        |> Option.defaultWith (fun () -> invalidOp "Every proxy slot is occupied. Review the existing mods before installing.")
 
     // =====================================================================
     // STEP 1 - RESHADE
@@ -1265,7 +1217,6 @@ module ModInstaller =
 
                 if not (skipSet.Contains(Path.GetFileName(src))) && not inSkippedTree then
                     let dst = Path.Combine(targetDir, relative)
-                    Directory.CreateDirectory(Path.GetDirectoryName(dst)) |> ignore
                     tracker.Copy(src, dst)
                     count <- count + 1
 
@@ -1281,8 +1232,6 @@ module ModInstaller =
     /// "mod files\reshade-shaders" - and point ReShade.ini at it.
     let private ensureStandardEffectPaths (tracker: Tracker) (exeDir: string) : string * int =
         let shadersRoot = Path.Combine(exeDir, reshadeShadersDirName)
-        Directory.CreateDirectory(Path.Combine(shadersRoot, "Shaders")) |> ignore
-        Directory.CreateDirectory(Path.Combine(shadersRoot, "Textures")) |> ignore
 
         let standardEffects =
             let root = modFilesRoot ()
@@ -1321,9 +1270,9 @@ module ModInstaller =
                             | None -> [ "[GENERAL]"; key + "=" + value ] @ lines)
                     existing
 
-            File.WriteAllLines(ini, updated)
-        with _ ->
-            ()
+            tracker.WriteText(ini, String.Join(Environment.NewLine, updated) + Environment.NewLine)
+        with ex ->
+            invalidOp ("Could not update ReShade settings: " + ex.Message)
 
         (shadersRoot, standardEffects)
 
@@ -1450,8 +1399,8 @@ module ModInstaller =
                     elif File.Exists(extra.SourcePath) then
                         tracker.Copy(extra.SourcePath, Path.Combine(exeDir, Path.GetFileName(extra.SourcePath)))
                         count <- count + 1
-                with _ ->
-                    ()
+                with ex ->
+                    invalidOp ("Could not deploy extra " + extra.Name + ": " + ex.Message)
 
             count
 
@@ -1580,7 +1529,7 @@ module ModInstaller =
     /// `mode` mirrors the switch in the Manage sheet. OptiScaler is its own
     /// self-contained route and never shares a folder with the ReShade ones;
     /// DX12 and DX11 differ only by the extra effect payload DX11 receives.
-    let install
+    let private installTracked
         (game: GameItem)
         (exePath: string)
         (plan: InstallPlan option)
@@ -1595,25 +1544,8 @@ module ModInstaller =
         /// `overlaySupported` says no to.
         (overlay: OverlayOptions)
         (report: Progress)
+        (tracker: Tracker)
         : InstallOutcome =
-        // Carry forward what a previous run already recorded, so re-running the
-        // installer to repair a broken install stays fully reversible.
-        let priorEntries =
-            try
-                let path = manifestPath game
-
-                if File.Exists(path) then
-                    let options = JsonSerializerOptions()
-                    options.PropertyNameCaseInsensitive <- true
-                    let m = JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(path), options)
-                    if isNull (box m.Files) then [||] else m.Files
-                else
-                    [||]
-            with _ ->
-                [||]
-
-        let tracker = Tracker(backupRoot game, priorEntries)
-
         try
             report "Preparing installation..." 0.03
 
@@ -1662,9 +1594,8 @@ module ModInstaller =
                       Neural = (if neuralWanted then "1" else "")
                       Files = tracker.Entries }
 
-                let options = JsonSerializerOptions()
-                options.WriteIndented <- true
-                File.WriteAllText(manifestPath game, JsonSerializer.Serialize(manifest, options))
+                DeploymentSafety.writeJsonAtomic (manifestPath game) manifest
+                tracker.Commit()
 
             if not (canWriteTo exeDir) then
                 { Success = false; Message = elevationNeededMessage }
@@ -1691,7 +1622,7 @@ module ModInstaller =
                 // clear stale hooks, take a free proxy name, leave the .ini
                 // untouched (NVIDIA needs no spoofing, no OptiPatcher).
                 report "Clearing previous OptiScaler hooks..." 0.10
-                clearStaleOptiScalerHooks exeDir |> ignore
+                clearStaleOptiScalerHooks tracker exeDir |> ignore
 
                 let slotName = pickOptiScalerSlot exeDir (optiApi = OptiVulkan)
                 let optiDll = Path.Combine(optiRoot, "OptiScaler.dll")
@@ -1792,7 +1723,7 @@ module ModInstaller =
                 let slotName =
                     amdSlots
                     |> Array.tryFind (fun n -> not (File.Exists(Path.Combine(exeDir, n))))
-                    |> Option.defaultValue amdSlots.[0]
+                    |> Option.defaultWith (fun () -> invalidOp "Every AMD proxy slot is occupied. Review existing mods first.")
 
                 report "Installing the AMD payload..." 0.20
 
@@ -1869,11 +1800,6 @@ module ModInstaller =
                           yield emulatorApi + ".dll"
                       yield! [ "ReShade.ini"; "ReShadePreset.ini"; "ReShade.log" ] ]
 
-                let before =
-                    reshadeArtifacts
-                    |> List.filter (fun n -> File.Exists(Path.Combine(exeDir, n)))
-                    |> Set.ofList
-
                 let (setupOk, setupError) =
                     if not (ExtrasStore.isPayloadEnabled reShadeSetupKey) then
                         report "ReShade setup is switched off, skipping." 0.16
@@ -1885,15 +1811,13 @@ module ModInstaller =
                         report "ReShade already present, skipping." 0.16
                         (true, "")
                     else
-                        runReShadeSetup setupExe exePath emulatorApi report
+                        tracker.External(
+                            reshadeArtifacts |> List.map (fun n -> Path.Combine(exeDir, n)) |> List.toArray,
+                            fun () -> runReShadeSetup setupExe exePath emulatorApi report)
 
-                if not setupOk && not (File.Exists(Path.Combine(exeDir, "ReShade.ini"))) then
+                if not setupOk then
                     { Success = false; Message = setupError }
                 else
-
-                for name in reshadeArtifacts do
-                    let p = Path.Combine(exeDir, name)
-                    if File.Exists(p) && not (before.Contains(name)) then tracker.Record(p, false, "")
 
                 report "Installing standard effects (DisplayDepth, UIMask, ...)..." 0.30
                 let (_, effectFiles) = ensureStandardEffectPaths tracker exeDir
@@ -1967,8 +1891,6 @@ module ModInstaller =
                   Message = "The \"" + dx9PayloadDirName + "\" payload is missing from \"mod files\"." }
             else
 
-            let backupDir = backupRoot game
-
             // -------------------------------------------------------------
             // 1. ReShade (headless, invisible)
             // -------------------------------------------------------------
@@ -1991,16 +1913,6 @@ module ModInstaller =
                 GameAnalyzer.isReShadeInstalled exePath
                 || (isDx9 && isReShadeFile reshadeDll)
 
-            let reshadeExisted = File.Exists(reshadeDll)
-
-            let reshadeBackup =
-                if reshadeExisted then
-                    let bp = Path.Combine(backupDir, shortHash reshadeDll + "_" + api + ".dll")
-                    if not (File.Exists(bp)) then File.Copy(reshadeDll, bp, false)
-                    bp
-                else
-                    ""
-
             // Re-running the setup over an existing ReShade returns a non-zero
             // exit code, so skip it when ReShade is already there.
             let reshadeError =
@@ -2011,21 +1923,16 @@ module ModInstaller =
                     report "ReShade already present, skipping." 0.16
                     ""
                 else
-                    let (ok, err) = runReShadeSetup setupExe exePath api report
+                    let targets =
+                        [| api + ".dll"; "ReShade.ini"; "ReShadePreset.ini"; "ReShade.log" |]
+                        |> Array.map (fun name -> Path.Combine(exeDir, name))
+                    let (ok, err) = tracker.External(targets, fun () -> runReShadeSetup setupExe exePath api report)
                     // The exit code is only a problem if the DLL really is absent.
-                    if ok || File.Exists(reshadeDll) || GameAnalyzer.isReShadeInstalled exePath then "" else err
+                    if ok then "" else err
 
             if reshadeError <> "" then
                 { Success = false; Message = reshadeError }
             else
-
-            if reShadeEnabled && not alreadyHasReShade then
-                tracker.Record(reshadeDll, reshadeExisted, reshadeBackup)
-
-                // ReShade also drops its configuration files; track them for a clean removal.
-                for extra in [ "ReShade.ini"; "ReShadePreset.ini"; "ReShade.log" ] do
-                    let p = Path.Combine(exeDir, extra)
-                    if File.Exists(p) then tracker.Record(p, false, "")
 
             // -------------------------------------------------------------
             // 1a. DX9 only - free the d3d9 slot for dgVoodoo
@@ -2051,19 +1958,10 @@ module ModInstaller =
                         else
                             report "Moving ReShade to the dxgi slot..." 0.18
 
-                            let targetExisted = File.Exists(target)
-
-                            let targetBackup =
-                                if targetExisted then
-                                    let bp = Path.Combine(backupDir, shortHash target + "_dxgi.dll")
-                                    if not (File.Exists(bp)) then File.Copy(target, bp, false)
-                                    bp
-                                else
-                                    ""
-
-                            File.Move(reshadeDll, target, true)
-                            tracker.Record(target, targetExisted, targetBackup)
+                            tracker.Copy(reshadeDll, target)
+                            tracker.Delete(reshadeDll)
                             ""
+
                     with ex ->
                         "Could not move ReShade to dxgi.dll: " + ex.Message
 
@@ -2220,221 +2118,145 @@ module ModInstaller =
             { Success = true; Message = summary }
 
         with ex ->
-            // Undo only what this run added, so a failed repair cannot wipe out
-            // a previously working install.
-            for entry in Seq.rev tracker.AddedThisRun do
-                try
-                    if entry.WasExisting && File.Exists(entry.BackupPath) then
-                        File.Copy(entry.BackupPath, entry.TargetPath, true)
-                    elif not entry.WasExisting && File.Exists(entry.TargetPath) then
-                        File.Delete(entry.TargetPath)
-                with _ ->
-                    ()
+            if tracker.IsCommitted then
+                { Success = true; Message = "Files installed and restore point saved. Completion reporting failed: " + ex.Message }
+            else
+                { Success = false; Message = "Installation failed: " + ex.Message }
 
-            { Success = false
-              Message = "Installation failed and was rolled back: " + ex.Message }
+    let private managedRoots (game: GameItem) (exePath: string) =
+        [| game.InstallDirectory; Path.GetDirectoryName(exePath) |]
+        |> Array.filter (String.IsNullOrWhiteSpace >> not)
+        |> Array.map Path.GetFullPath
+        |> Array.distinct
+
+    let private readRestorePoint (game: GameItem) (exePath: string) =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        let manifest = JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(manifestPath game), options)
+        if isNull (box manifest) || isNull (box manifest.Files) then invalidOp "The restore point is invalid. Backups have been retained."
+        if not (String.Equals(Path.GetFullPath(manifest.ExecutablePath), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) then
+            invalidOp "This restore point belongs to a different executable. Select the original target before modifying it."
+        manifest
+
+    /// Cheap, non-mutating checks, also run BEFORE removing an old route.
+    let preflight (exePath: string) (mode: InstallMode) (arch: InstallArch) (api: OptiScalerApi) =
+        [| yield! HealthCheck.selectionIssues exePath (modeKey mode) (archKey arch) (optiApiKey api)
+           if (GameComponents.reEngineMarkers exePath).Length > 0 then
+               yield "RE Engine：请导入含 REFramework 的 033 运行包，选择 RE 专用路线并预览 / Import a package with REFramework and preview its RE-specific route."
+           if HealthCheck.runningGame exePath then yield "Close the game before changing its files."
+           let root = modFilesRoot ()
+           if String.IsNullOrWhiteSpace(root) then yield "The mod files folder is missing next to the application."
+           else
+               let required =
+                   match mode with
+                   | OptiScalerMode -> [ Path.Combine(root, optiScalerPayloadDirName api, "OptiScaler.dll"); Path.Combine(root, dlss5DirName, dlssnrFileName) ]
+                   | AmdMode -> [ Path.Combine(root, amdPayloadDirName, "version.dll"); Path.Combine(root, dlss5DirName, dlssnrFileName) ]
+                   | Emulator -> [ reShadeSetupPath (); Path.Combine(root, feedAddonName); Path.Combine(root, dlss5DirName, dlssnrFileName); Path.Combine(root, "streamline_dlss", "dlss", "nvngx_dlss.dll") ]
+                   | _ when arch = Bit32 -> [ reShadeSetupPath (); Path.Combine(root, feedAddon32Name) ]
+                   | _ -> [ reShadeSetupPath (); Path.Combine(root, renodxAddonName); Path.Combine(root, feedAddonName); Path.Combine(root, dlss5DirName, dlssnrFileName) ]
+               for path in required do
+                   if not (File.Exists(path)) then yield "Required payload missing: " + path
+               if mode = Dx9 && not (Directory.Exists(Path.Combine(root, dx9PayloadDirName))) then yield "The DX9 payload folder is missing."
+               if (mode = Dx9 || mode = Dx11) && arch = Bit32 && not (Directory.Exists(Path.Combine(root, bit32PayloadDirName, host64DirName))) then yield "The 64-bit host payload for 32-bit games is missing."
+               if mode = Emulator && not (Directory.Exists(Path.Combine(root, emulatorPayloadDirName))) then yield "The emulator payload folder is missing." |]
+
+    let restoreIssues (game: GameItem) (exePath: string) =
+        try
+            if not (isInstalled game) then [||]
+            else
+                let manifest = readRestorePoint game exePath
+                DeploymentSafety.checkRestore (managedRoots game exePath) (backupRoot game) manifest.Files
+        with ex -> [|ex.Message|]
+
+    let install game exePath plan mode arch optiApi neural overlay report : InstallOutcome =
+        try
+            let issues = [| yield! preflight exePath mode arch optiApi
+                            if (installedMode game).StartsWith("package:") then yield "Restore the managed package before installing another route." |]
+            if issues.Length > 0 then { Success = false; Message = String.Join(Environment.NewLine, issues) }
+            else
+                use operationLock = DeploymentSafety.acquireLock (backupRoot game)
+                let prior = if isInstalled game then (readRestorePoint game exePath).Files else [||]
+                let tracker = Tracker(managedRoots game exePath, backupRoot game, prior)
+                let outcome = installTracked game exePath plan mode arch optiApi neural overlay report tracker
+                if outcome.Success then
+                    tracker.Commit()
+                    outcome
+                else
+                    let errors = tracker.Rollback()
+                    { Success = false
+                      Message = outcome.Message + Environment.NewLine +
+                                (if errors.Length = 0 then "Files touched by this attempt were restored."
+                                 else "Recovery incomplete; backups retained. " + String.Join(Environment.NewLine, errors)) }
+        with ex -> { Success = false; Message = "Installation stopped: " + ex.Message }
+
+    /// A preview is immutable, tied to package content and current game bytes.
+    let previewPackage (game: GameItem) exe (package: RuntimePackages.Package) profile =
+        let fresh = RuntimePackages.load (Directory.GetParent(package.Root).FullName) package.Id
+        let backups = Path.Combine(appDataRoot (), "Backups", safeId game)
+        PackagePlanning.create game.InstallDirectory exe backups (isInstalled game) fresh profile
+
+    let installPackage (game: GameItem) (package: RuntimePackages.Package) (reviewed: PackagePlanning.Preview) (report: Progress) : InstallOutcome =
+        try
+            use operationLock = DeploymentSafety.acquireLock (backupRoot game)
+            if reviewed.Errors.Length > 0 then invalidOp "The reviewed plan contains blocking issues."
+            use gameLease = File.Open(reviewed.ExePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+            let fresh = previewPackage game reviewed.ExePath package reviewed.ProfileId
+            if fresh.Errors.Length > 0 then invalidOp (String.Join("\n", fresh.Errors))
+            if fresh.Token <> reviewed.Token then invalidOp "预览已过期，文件或适配条件发生变化。请重新预览 / The preview is stale; review a new plan."
+            let tracker = Tracker(managedRoots game reviewed.ExePath, backupRoot game, [||])
+            try
+                for i in 0 .. fresh.Rows.Length - 1 do
+                    let row = fresh.Rows.[i]
+                    if HealthCheck.runningGame reviewed.ExePath then invalidOp "Close the game before changing files."
+                    DeploymentSafety.validatePath (managedRoots game reviewed.ExePath) row.Target
+                    if DeploymentSafety.hashFile row.Target <> row.BeforeHash then invalidOp ("Target changed after preview: " + row.RelativeTarget)
+                    if row.Action = "add" || row.Action = "replace" then
+                        if DeploymentSafety.hashFile row.Source <> row.SourceHash then invalidOp ("Package changed after preview: " + row.RelativeTarget)
+                        report ("部署 / Deploy: " + row.RelativeTarget) (float i / float fresh.Rows.Length)
+                        tracker.Copy(row.Source, row.Target)
+                        if DeploymentSafety.hashFile row.Target <> row.SourceHash then invalidOp ("Deployed checksum mismatch: " + row.RelativeTarget)
+                let profile = package.Manifest.Profiles |> Array.find (fun p -> p.Id = reviewed.ProfileId)
+                let manifest =
+                    { GameId = safeId game; GameTitle = game.Title; ExecutablePath = reviewed.ExePath
+                      InstalledAtUtc = DateTime.UtcNow.ToString("o"); Mode = "package:" + reviewed.ProfileId
+                      Arch = if profile.Architecture = "x86" then "32" else "64"
+                      Api = package.Id; Neural = ""; Files = tracker.Entries }
+                DeploymentSafety.writeJsonAtomic (manifestPath game) manifest
+                tracker.Commit()
+                try report "部署完成 / Deployment complete" 1.0 with _ -> ()
+                { Success = true; Message = "运行包已部署，原件备份已保存。请在游戏内验证效果 / Package deployed with verified backups; in-game verification is still required." }
+            with ex ->
+                if tracker.IsCommitted then { Success = true; Message = "Deployment saved. " + ex.Message }
+                else
+                    let errors = tracker.Rollback()
+                    { Success = false; Message = ex.Message + "\n" + (if errors.Length = 0 then "本次改动已还原 / This attempt was rolled back." else "还原未完成，保留备份 / Recovery incomplete: " + String.Join("\n", errors)) }
+        with ex -> { Success = false; Message = "安装已停止 / Installation stopped: " + ex.Message }
 
     // =====================================================================
     // UNINSTALL
     // =====================================================================
-    /// The mod was put there by something other than this app, so there are no
-    /// backups to restore. Removing the ray reconstruction model is enough to
-    /// turn DLSS 5 off, and it is the only file we are certain we may delete.
-    let private removeForeignInstall (game: GameItem) (exePath: string) (plan: InstallPlan option) (report: Progress) : InstallOutcome =
+    let uninstall (game: GameItem) (exePath: string) (_plan: InstallPlan option) (report: Progress) : InstallOutcome =
         try
-            report "Locating DLSS 5 files..." 0.15
-
-            let dlssDirs, streamlineDirs =
-                match plan with
-                | Some p -> p.DlssDirs, p.StreamlineDirs
-                | None ->
-                    (findDlssFolders game.InstallDirectory exePath |> List.map (fun f -> f.Directory) |> List.toArray),
-                    (findStreamlineFolders game.InstallDirectory exePath
-                     |> List.map (fun f -> f.Directory)
-                     |> List.toArray)
-
-            let status = inspect game exePath dlssDirs streamlineDirs
-
-            if status.DlssnrLocations.Length = 0 then
-                { Success = false; Message = "No DLSS 5 files were found for this game." }
+            use operationLock = DeploymentSafety.acquireLock (backupRoot game)
+            if HealthCheck.runningGame exePath then
+                { Success = false; Message = "Close the game before restoring its files." }
+            elif not (isInstalled game) then
+                { Success = false; Message = "No manager restore point exists. Use the installer that created this mod; filenames alone cannot establish ownership." }
             else
-                let mutable removed = 0
-                let total = status.DlssnrLocations.Length
-
-                status.DlssnrLocations
-                |> Array.iteri (fun index dir ->
-                    report "Removing DLSS 5 files..." (0.2 + 0.7 * float (index + 1) / float total)
-
-                    try
-                        let target = Path.Combine(dir, dlssnrFileName)
-
-                        if File.Exists(target) then
-                            File.Delete(target)
-                            removed <- removed + 1
-                    with _ ->
-                        ())
-
-                report "DLSS 5 removed." 1.0
-
-                { Success = true
-                  Message =
-                    sprintf
-                        "This DLSS 5 install was not made by DLSS 5 MANAGER, so only %s was removed (%d location(s)). ReShade and the game's own runtime files were left untouched."
-                        dlssnrFileName
-                        removed }
+                report "Checking file ownership and backup checksums..." 0.15
+                let manifest = readRestorePoint game exePath
+                let roots = managedRoots game exePath
+                let issues = DeploymentSafety.checkRestore roots (backupRoot game) manifest.Files
+                if issues.Length > 0 then
+                    { Success = false; Message = "Restore stopped before modifying files. " + String.Join(Environment.NewLine, issues) }
+                else
+                    report "Restoring verified original files..." 0.45
+                    let kept = DeploymentSafety.restore roots (backupRoot game) manifest.Files
+                    // No heuristic sweep: only manifest-owned, unchanged files
+                    // are deleted. Failures keep the manifest for an idempotent retry.
+                    File.Delete(manifestPath game)
+                    try report "Restore completed." 1.0 with _ -> ()
+                    { Success = true
+                      Message = sprintf "Restore completed for %d tracked file(s). %d changed settings/log file(s) were kept. Original backups remain in %s."
+                                    manifest.Files.Length kept.Length (backupRoot game) }
         with ex ->
-            { Success = false; Message = "Removal failed: " + ex.Message }
-
-    let uninstall (game: GameItem) (exePath: string) (plan: InstallPlan option) (report: Progress) : InstallOutcome =
-        try
-            let path = manifestPath game
-
-            let targetDir =
-                try
-                    if String.IsNullOrWhiteSpace(exePath) then "" else Path.GetDirectoryName(exePath)
-                with _ ->
-                    ""
-
-            if not (canWriteTo targetDir) then
-                // Removal restores and deletes files, so it needs the same
-                // rights the install did.
-                { Success = false; Message = elevationNeededMessage }
-            elif not (File.Exists(path)) then
-                removeForeignInstall game exePath plan report
-            else
-                report "Reading restore point..." 0.08
-
-                let options = JsonSerializerOptions()
-                options.PropertyNameCaseInsensitive <- true
-                let manifest = JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(path), options)
-
-                // An OptiScaler install unwinds itself first: the model goes,
-                // then OptiScaler's own uninstaller runs out of sight. What it
-                // leaves behind is picked up by the manifest pass below.
-                let mutable optiNote = ""
-
-                if not (isNull (box manifest.Mode))
-                   && manifest.Mode.Equals("optiscaler", StringComparison.OrdinalIgnoreCase) then
-                    let exeDir =
-                        try
-                            if String.IsNullOrWhiteSpace(exePath) then
-                                Path.GetDirectoryName(manifest.ExecutablePath)
-                            else
-                                Path.GetDirectoryName(exePath)
-                        with _ ->
-                            ""
-
-                    if not (String.IsNullOrWhiteSpace(exeDir)) && Directory.Exists(exeDir) then
-                        report "Removing ray reconstruction model..." 0.15
-
-                        try
-                            let model = Path.Combine(exeDir, dlssnrFileName)
-                            if File.Exists(model) then File.Delete(model)
-                        with _ ->
-                            ()
-
-                        report "Removing OptiScaler hooks..." 0.3
-
-                        // Anything still carrying OptiScaler's version resource
-                        // is ours, whatever name it ended up under.
-                        let cleared = clearStaleOptiScalerHooks exeDir
-
-                        optiNote <- sprintf "OptiScaler removed (%d hook(s)). " cleared
-
-                let files = if isNull (box manifest.Files) then [||] else manifest.Files
-                let total = max 1 files.Length
-                let mutable index = 0
-                let mutable restored = 0
-                let mutable removed = 0
-
-                for entry in Array.rev files do
-                    index <- index + 1
-                    report "Restoring original game files..." (0.4 + 0.5 * float index / float total)
-
-                    try
-                        if entry.WasExisting && File.Exists(entry.BackupPath) then
-                            File.Copy(entry.BackupPath, entry.TargetPath, true)
-                            restored <- restored + 1
-                        elif not entry.WasExisting && File.Exists(entry.TargetPath) then
-                            File.Delete(entry.TargetPath)
-                            removed <- removed + 1
-                    with _ ->
-                        ()
-
-                try
-                    let root = Path.GetDirectoryName(manifest.ExecutablePath)
-
-                    if not (String.IsNullOrWhiteSpace(root)) then
-                        // Config and log files the mod wrote on its first run.
-                        for name in runtimeLeftovers do
-                            let p = Path.Combine(root, name)
-
-                            try
-                                if File.Exists(p) then File.Delete(p)
-                            with _ ->
-                                ()
-
-                        // Sweep for our own files the manifest did not account
-                        // for - an install made by an older build recorded a
-                        // different set of paths, and whatever it left behind
-                        // is still unmistakably ours.
-                        let handled =
-                            files
-                            |> Array.choose (fun e ->
-                                if String.IsNullOrWhiteSpace(e.TargetPath) then None else Some e.TargetPath)
-                            |> fun paths -> HashSet<string>(paths, StringComparer.OrdinalIgnoreCase)
-
-                        for name in exclusiveArtifacts do
-                            for dir in [ root; Path.Combine(root, host64DirName) ] do
-                                let p = Path.Combine(dir, name)
-
-                                try
-                                    if File.Exists(p) && not (handled.Contains(p)) then
-                                        File.Delete(p)
-                                        removed <- removed + 1
-                                with _ ->
-                                    ()
-
-                        // ReShade sits on a name the game could also use, so it
-                        // is only removed when its own version resource says so
-                        // and the manifest did not already deal with it.
-                        // ReShade64.dll is here rather than in the exclusive
-                        // sweep for the same reason as the rest: it is only
-                        // ours when its own version resource says so. Nothing
-                        // installs it any more, but an install made while the
-                        // OptiScaler route briefly hosted the overlay still has
-                        // one, and that has to come off cleanly.
-                        for name in [ "dxgi.dll"; "d3d9.dll"; "d3d11.dll"; "d3d12.dll"; "opengl32.dll"
-                                      "ReShade64.dll" ] do
-                            let p = Path.Combine(root, name)
-
-                            try
-                                if not (handled.Contains(p)) && isReShadeFile p then
-                                    File.Delete(p)
-                                    removed <- removed + 1
-                            with _ ->
-                                ()
-
-                        // Folders the payloads brought with them are left empty
-                        // by the file pass above; drop them so the game folder
-                        // comes back clean.
-                        for name in [ "OptiScaler"; "Licenses"; reshadeShadersDirName; host64DirName ] do
-                            let dir = Path.Combine(root, name)
-
-                            // No files left anywhere inside means everything in
-                            // there was ours; empty subfolders go with it.
-                            if Directory.Exists(dir)
-                               && Directory.GetFiles(dir, "*", SearchOption.AllDirectories).Length = 0 then
-                                Directory.Delete(dir, true)
-                with _ ->
-                    ()
-
-                File.Delete(path)
-                report "DLSS 5 removed." 1.0
-
-                { Success = true
-                  Message =
-                    optiNote
-                    + sprintf "Restored %d original file(s) and removed %d added file(s)." restored removed }
-        with ex ->
-            { Success = false; Message = "Uninstall failed: " + ex.Message }
+            { Success = false; Message = "Restore incomplete; restore point and backups retained. " + ex.Message }

@@ -1,0 +1,53 @@
+name: Publish already verified fork build
+on:
+  push:
+    branches: [codex/health-check-safe-restore]
+    paths: [release/verified-build.json]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fork-preview-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'mutsuki14/DLSS-5-MANAGER' && github.ref == 'refs/heads/codex/health-check-safe-restore'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify source build and Windows verification gate
+        id: source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $source = Get-Content release/verified-build.json -Raw | ConvertFrom-Json
+          if ([string]$source.runId -notmatch '^\d+$' -or $source.commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid build reference.' }
+          $runJson = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$($source.runId)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read source run.' }
+          $run = $runJson | ConvertFrom-Json
+          if ($run.head_sha -cne $source.commit -or $run.path -cne '.github/workflows/release.yml' -or $run.head_repository.full_name -cne $env:GITHUB_REPOSITORY -or $run.head_branch -cne 'codex/health-check-safe-restore') { throw 'Source run provenance mismatch.' }
+          $jobsJson = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$($source.runId)/jobs"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read Windows build result.' }
+          $build = @(($jobsJson | ConvertFrom-Json).jobs | Where-Object name -CEQ 'build')
+          if ($build.Count -ne 1 -or $build[0].conclusion -cne 'success') { throw 'Windows package verification did not pass.' }
+          "run_id=$($source.runId)" >> $env:GITHUB_OUTPUT
+          "commit=$($source.commit)" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release-assets
+          path: release-assets
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish the same verified artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: ./release/publish-release.ps1 -AssetsDirectory ./release-assets -SourceCommit $env:RELEASE_SOURCE_COMMIT
