@@ -1585,7 +1585,7 @@
                                 <SelectableTextBlock Text="{Binding GameRequirementsText}" IsVisible="{Binding HasGameRequirements}"
                                                      Foreground="#FDE68A" FontSize="11" TextWrapping="Wrap" />
                                 <Button Content="导入 ZIP / Import ZIP" Click="OnImportRuntimePackageClicked" IsEnabled="{Binding IsManageReady}" />
-                                <CheckBox Content="使用导入的运行包 / Use imported package" IsChecked="{Binding UseManagedPackage}" IsEnabled="{Binding IsManageReady}" />
+                                <CheckBox Content="使用运行包安装方案 / Use package installation plan" IsChecked="{Binding UseManagedPackage}" IsEnabled="{Binding IsManageReady}" />
                                 <StackPanel Spacing="10" IsVisible="{Binding UseManagedPackage}">
                                     <TextBlock Text="运行包版本 / Package version" Foreground="#94A3B8" FontSize="11" />
                                     <ComboBox ItemsSource="{Binding RuntimePackages}" SelectedItem="{Binding SelectedRuntimePackage}" IsEnabled="{Binding IsManageReady}" HorizontalAlignment="Stretch">
@@ -1612,6 +1612,40 @@
                                     <Button Content="确认按预览安装 / Confirm installation" Click="OnConfirmPackageClicked" IsVisible="{Binding HasPackagePreview}" IsEnabled="{Binding CanConfirmPackage}" />
                                 </StackPanel>
                                 <TextBlock Text="{Binding InstallStatusText}" IsVisible="{Binding PackageBusy}" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="在线组件与版本 / Online component versions" Foreground="#E2E8F0" FontWeight="SemiBold" />
+                                <SelectableTextBlock Text="{Binding InstalledComponentVersions}" Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" />
+                                <TextBlock Text="选择版本并加入方案。Aurora 可独立安装；其他组件使用上方的 033 路线。生成预览时自动补全适用依赖。 / Add selected versions, then prepare the installation plan."
+                                           Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" />
+                                <StackPanel Spacing="8" IsEnabled="{Binding IsManageReady}">
+                                    <ComboBox ItemsSource="{Binding OnlineComponents.Sources}" SelectedItem="{Binding OnlineComponents.SelectedSource}" HorizontalAlignment="Stretch" />
+                                    <TextBlock Text="{Binding OnlineComponents.SourceInfo}" Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" />
+                                    <CheckBox Content="允许预发布 / Include previews" IsChecked="{Binding OnlineComponents.IncludePreview}" />
+                                    <Button Content="刷新版本列表 / Refresh versions" Click="OnRefreshOnlineClicked" />
+                                    <CheckBox Content="下载时获取最新 Release / Fetch latest at download" IsChecked="{Binding OnlineComponents.UseLatest}" />
+                                    <ComboBox ItemsSource="{Binding OnlineComponents.Versions}" SelectedItem="{Binding OnlineComponents.SelectedVersion}" IsEnabled="{Binding !OnlineComponents.UseLatest}" HorizontalAlignment="Stretch" />
+                                    <TextBlock Text="资源包 / Release asset（旧版 REFramework 的 TDB 包需对应非光追游戏版本）" Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" />
+                                    <ComboBox ItemsSource="{Binding OnlineComponents.Assets}" SelectedItem="{Binding OnlineComponents.SelectedAsset}" HorizontalAlignment="Stretch">
+                                        <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" /></DataTemplate></ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                    <Button Content="下载所选版本并加入方案 / Download and add" Click="OnDownloadOnlineClicked" />
+                                    <ItemsControl ItemsSource="{Binding OnlineComponents.Pending}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid ColumnDefinitions="*,Auto" Margin="0,5">
+                                                    <TextBlock Text="{Binding Display}" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" />
+                                                    <Button Grid.Column="1" Content="移除 / Remove" Click="OnRemoveOnlineClicked" Margin="8,0,0,0" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <Button Content="补全依赖并生成安装预览 / Resolve dependencies and preview" Click="OnPreviewOnlineClicked" IsVisible="{Binding OnlineComponents.HasPending}" />
+                                </StackPanel>
+                                <Button Content="取消下载 / Cancel" Click="OnCancelOnlineClicked" IsVisible="{Binding CanCancelOnline}" />
                             </StackPanel>
                         </Border>
 

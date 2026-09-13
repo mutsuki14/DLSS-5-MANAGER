@@ -6,7 +6,7 @@
 
 <br/>
 
-[![Download Latest Release](https://img.shields.io/badge/DOWNLOAD-LATEST%20RELEASE%20(V1.2.5)-00e676?style=for-the-badge&logo=github&logoColor=white)](https://github.com/NODIX-TECH/DLSS-5-MANAGER/releases)
+[![Download Fork Preview](https://img.shields.io/badge/DOWNLOAD-FORK%20PREVIEW-00e676?style=for-the-badge&logo=github&logoColor=white)](https://github.com/mutsuki14/DLSS-5-MANAGER/releases)
 
 <br/>
 
@@ -43,7 +43,7 @@ Build and run the regression suite with the .NET 8 SDK:
 
 ```sh
 dotnet build "DLSS 5 MANAGER.fsproj" --configuration Debug
-dotnet fsi --exec tests/RegressionTests.fsx
+dotnet fsi --exec tests/ComponentTests.fsx
 ```
 
 The checkout does not include the `mod files` runtime payload. Building the manager does not download or manufacture those binaries. Existing upstream authorship and copyright remain unchanged.
@@ -58,7 +58,13 @@ The fork removes the community tab, report/comment composer and community networ
 
 ### Fork preview downloads
 
-Windows x64 setup and self-contained portable ZIP: [mutsuki14 fork releases](https://github.com/mutsuki14/DLSS-5-MANAGER/releases). The original application's authorship remains NODIX TECH / Numidia Studios. These packages contain the manager; import your own 033 ZIP after installation.
+Windows x64 setup and self-contained portable ZIP: [mutsuki14 fork releases](https://github.com/mutsuki14/DLSS-5-MANAGER/releases). The original application's authorship remains NODIX TECH / Numidia Studios. These packages contain the manager; import your own 033 ZIP or select an online Aurora release after installation.
+
+### Online component versions
+
+Manage now offers a source, release and asset selector for **OptiScaler Aurora, REFramework, DLSS5 Feeder, RenoDX DLSS5 (Krish / ShortFuse), and DLSS NR / SR models**. Choose the latest appropriate release at download time, or pin a listed version. Downloaded bytes are verified and cached; the dependency preview records repository, tag, asset identity and SHA-256 before applying the plan with backup and restore.
+
+Aurora uses [abc354402600/OptiScaler-Aurora](https://github.com/abc354402600/OptiScaler-Aurora) and can form a standalone package for native-DLSS x64 DX12 games. Other combinations build on an imported 033 package. Required Feeder/RenoDX and REFramework dependencies are downloaded into the same reviewable plan. These are experimental game integrations; application tests do not establish GPU or game compatibility. See [在线组件与版本选择](docs/online-components.md) for sources, route restrictions and usage.
 
 The release workflow builds from the development branch when `release/release.json` changes, tests the app and installer on Windows, verifies uploaded assets, then publishes a prerelease in this fork. It never merges `main`. For a local Windows build with .NET 8 and Inno Setup 6, run `pwsh ./release/build-windows.ps1` from a fresh checkout.
 

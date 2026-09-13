@@ -861,3 +861,19 @@ type MainWindow() as this =
         match this.DataContext with
         | :? MainViewModel as vm -> vm.SetLayoutMode(true)
         | _ -> ()
+
+    member this.OnRefreshOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.RefreshOnlineVersions() | _ -> ()
+    member this.OnDownloadOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.DownloadOnlineComponent() | _ -> ()
+    member this.OnPreviewOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.PreviewOnlineComponents() | _ -> ()
+    member this.OnCancelOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with :? MainViewModel as vm -> vm.CancelOnline() | _ -> ()
+    member this.OnRemoveOnlineClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext, sender with
+        | (:? MainViewModel as vm), (:? Control as control) when vm.IsManageReady ->
+            match control.DataContext with
+            | :? DLSS_5_MANAGER.Services.ComponentReleases.Cached as cached -> vm.OnlineComponents.Remove(cached)
+            | _ -> ()
+        | _ -> ()

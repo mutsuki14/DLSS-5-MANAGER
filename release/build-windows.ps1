@@ -13,18 +13,20 @@ $publish = Join-Path $output 'app'
 $assets = Join-Path $output 'assets'
 New-Item $publish, $assets -ItemType Directory -Force | Out-Null
 
-& dotnet fsi --exec tests/RegressionTests.fsx
+& dotnet build 'DLSS 5 MANAGER.fsproj' --configuration Debug
+if ($LASTEXITCODE -ne 0) { throw 'Debug build failed.' }
+& dotnet fsi --exec tests/ComponentTests.fsx
 if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed.' }
 & dotnet publish 'DLSS 5 MANAGER.fsproj' --configuration Release --runtime win-x64 --self-contained true --output $publish -p:PublishSingleFile=false -p:PublishTrimmed=false -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) { throw 'Release publish failed.' }
-foreach ($name in @('DLSS 5 MANAGER.exe','DLSS 5 MANAGER.dll','DLSS 5 MANAGER.deps.json','DLSS 5 MANAGER.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','Avalonia.Controls.dll','libSkiaSharp.dll','languages\languages.JSON')) {
+foreach ($name in @('DLSS 5 MANAGER.exe','DLSS 5 MANAGER.dll','DLSS 5 MANAGER.deps.json','DLSS 5 MANAGER.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','SharpCompress.dll','Avalonia.Controls.dll','libSkiaSharp.dll','languages\languages.JSON')) {
     if (-not (Test-Path (Join-Path $publish $name) -PathType Leaf)) { throw "Published dependency missing: $name" }
 }
 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $publish 'DLSS 5 MANAGER.exe')).ProductVersion
 if (-not $version.StartsWith($meta.version, [StringComparison]::Ordinal)) { throw "Unexpected application version: $version" }
 Copy-Item 'Copyright.txt', 'release/README-Windows.txt' $publish
 New-Item (Join-Path $publish 'docs') -ItemType Directory | Out-Null
-Copy-Item 'docs/runtime-packages.md', 'docs/health-check-and-restore.md' (Join-Path $publish 'docs')
+Copy-Item 'docs/runtime-packages.md', 'docs/health-check-and-restore.md', 'docs/online-components.md' (Join-Path $publish 'docs')
 $info = [ordered]@{ repository='mutsuki14/DLSS-5-MANAGER'; commit=$sourceSha; tag=$meta.tag; version=$meta.version; runtime='win-x64'; selfContained=$true; builtAtUtc=[DateTime]::UtcNow.ToString('o') }
 $info | ConvertTo-Json | Set-Content (Join-Path $publish 'build-info.json') -Encoding utf8
 $inventory = @(Get-ChildItem $publish -File -Recurse | Sort-Object FullName | ForEach-Object {

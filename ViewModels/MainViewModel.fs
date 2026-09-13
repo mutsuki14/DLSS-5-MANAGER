@@ -248,6 +248,9 @@ type MainViewModel() as this =
     let mutable selectedRuntimeProfile = ""
     let mutable useManagedPackage = false
     let mutable packagePreview: PackagePlanning.Preview option = None
+    let mutable preparedOnlinePackage: RuntimePackages.Package option = None
+    let onlineComponents = OnlineComponentsViewModel(fun () -> this.ClearPackagePreview())
+    let mutable onlineCancellation: System.Threading.CancellationTokenSource option = None
     let mutable packageAdvice = ""
     let mutable packageBusy = false
     let mutable isModInstalled = false
@@ -1680,6 +1683,7 @@ type MainViewModel() as this =
     member private this.RaiseDlss5State() =
         this.RaisePropertyChanged("IsManagedPackageInstalled")
         this.RaisePropertyChanged("InstalledRuntimePackageText")
+        this.RaisePropertyChanged("InstalledComponentVersions")
         this.RaisePropertyChanged("LegacyControlsVisible")
         this.RaisePropertyChanged("CanConfirmPackage")
         this.RaisePropertyChanged("ShowInstallButton")
@@ -1808,6 +1812,7 @@ type MainViewModel() as this =
             |> ignore
 
     member this.OpenManage(card: GameCardViewModel) =
+        onlineComponents.Clear()
         this.ClearPackagePreview()
         manageCard <- Some card
         manageAnalysis <- None
@@ -1929,6 +1934,70 @@ type MainViewModel() as this =
             this.AnalyzeManageTarget()
         | _ -> ()
 
+    member _.OnlineComponents = onlineComponents
+    member this.InstalledComponentVersions =
+        runtimePackages |> Seq.tryFind (fun p -> p.Id=installedApi) |> Option.map (fun p -> String.Join("\n",p.Manifest.Provenance)) |> Option.defaultValue ""
+    member _.CanCancelOnline = onlineCancellation.IsSome
+    member _.CancelOnline() = onlineCancellation |> Option.iter (fun c -> c.Cancel())
+    member private this.StartOnline(work: System.Threading.CancellationToken -> Async<'a>, complete: 'a -> unit) =
+        if this.IsManageReady then
+            this.ClearPackagePreview()
+            this.SetPackageBusy(true)
+            this.InstallResultText <- ""
+            let cancellation = new System.Threading.CancellationTokenSource()
+            onlineCancellation <- Some cancellation
+            this.RaisePropertyChanged("CanCancelOnline")
+            System.Threading.Tasks.Task.Run(fun () ->
+                let result = try Ok (Async.RunSynchronously(work cancellation.Token)) with ex -> Error ex
+                Dispatcher.UIThread.Post(fun () ->
+                    onlineCancellation <- None
+                    cancellation.Dispose()
+                    this.SetPackageBusy(false)
+                    this.RaisePropertyChanged("CanCancelOnline")
+                    this.InstallStatusText <- ""
+                    match result with
+                    | Ok value -> complete value
+                    | Error (:? System.OperationCanceledException) -> this.InstallResultText <- "已取消，游戏文件未改变 / Cancelled; game files unchanged."
+                    | Error error ->
+                        this.InstallResultIsError <- true
+                        this.InstallResultText <- error.Message)) |> ignore
+    member this.RefreshOnlineVersions() =
+        let source, previews, exe = onlineComponents.SelectedSource,onlineComponents.IncludePreview,manageExePath
+        this.StartOnline((fun ct -> ComponentReleases.listReleases source previews ct), (fun releases ->
+            onlineComponents.SetVersions(releases,exe)
+            this.InstallResultIsError <- false
+            this.InstallResultText <- sprintf "找到 %d 个可选 Release / %d releases" releases.Length releases.Length))
+    member this.DownloadOnlineComponent() =
+        let exe = manageExePath
+        let report text = Dispatcher.UIThread.Post(fun () -> this.InstallStatusText <- text)
+        this.StartOnline((fun ct -> onlineComponents.Download(exe,report,ct)), (fun cached ->
+            onlineComponents.Add(cached)
+            this.UseManagedPackage <- true
+            this.InstallResultIsError <- false
+            this.InstallResultText <- "已加入方案 / Added to plan: " + cached.Display))
+    member this.PreviewOnlineComponents() =
+        match manageCard with
+        | Some card when onlineComponents.HasPending ->
+            let exe, profile = manageExePath, selectedRuntimeProfile
+            let choices = onlineComponents.Pending |> Seq.toArray
+            let basePackage = if isNull (box selectedRuntimePackage) then None else Some selectedRuntimePackage
+            let report text = Dispatcher.UIThread.Post(fun () -> this.InstallStatusText <- text)
+            this.StartOnline((fun ct -> async {
+                let freshBase = basePackage |> Option.map (fun p -> RuntimePackages.load (System.IO.Directory.GetParent(p.Root).FullName) p.Id)
+                let! package,downloads = ComponentPackages.prepare (RuntimePackages.defaultStore ()) card.Game.InstallDirectory exe freshBase profile choices report ct
+                let preview = ModInstaller.previewPackage card.Game exe package package.Manifest.Profiles.[0].Id
+                return package,downloads,preview }), (fun (package,downloads,preview) ->
+                for cached in downloads do onlineComponents.Add(cached)
+                if not (runtimePackages |> Seq.exists (fun p -> p.Id=package.Id)) then runtimePackages.Insert(0,package)
+                this.UseManagedPackage <- true
+                preparedOnlinePackage <- Some package
+                packagePreview <- Some preview
+                packageAdvice <- preview.Advice
+                for name in ["PackageAdvice";"PackageComponentsText";"HasPackageComponents";"PackagePreviewText";"HasPackagePreview";"CanConfirmPackage"] do this.RaisePropertyChanged(name)
+                this.InstallResultIsError <- preview.Errors.Length>0
+                this.InstallResultText <- "组件版本已固定，请查看运行包区域的文件预览 / Component versions locked; review the file plan in the package section."))
+        | _ -> ()
+
     member _.PackageBusy = packageBusy
     member _.RuntimePackages = runtimePackages
     member _.RuntimeProfiles = runtimeProfiles
@@ -1966,8 +2035,9 @@ type MainViewModel() as this =
     member _.HasPackageComponents = packagePreview |> Option.exists (fun p -> p.Components.Length > 0)
     member _.PackagePreviewText = packagePreview |> Option.map PackagePlanning.format |> Option.defaultValue ""
     member _.HasPackagePreview = packagePreview.IsSome
-    member this.CanConfirmPackage = this.IsManageReady && (packagePreview |> Option.exists (fun p -> p.Errors.Length = 0))
+    member this.CanConfirmPackage = this.IsManageReady && (not onlineComponents.HasPending || preparedOnlinePackage.IsSome) && (packagePreview |> Option.exists (fun p -> p.Errors.Length = 0))
     member private this.ClearPackagePreview() =
+        preparedOnlinePackage <- None
         packagePreview <- None
         packageAdvice <- ""
         for name in ["PackageAdvice"; "PackageComponentsText"; "HasPackageComponents"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
@@ -2037,7 +2107,7 @@ type MainViewModel() as this =
     member this.ConfirmRuntimePackage() =
         match manageCard, packagePreview with
         | Some card, Some preview when this.CanConfirmPackage ->
-            let package = selectedRuntimePackage
+            let package = preparedOnlinePackage |> Option.defaultValue selectedRuntimePackage
             this.ClearPackagePreview()
             this.IsInstalling <- true
             this.InstallProgress <- 0.0

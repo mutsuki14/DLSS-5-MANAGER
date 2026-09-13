@@ -18,7 +18,7 @@ module PackagePlanning =
           BeforeHash: string; Action: string; Bytes: int64; BeforeBytes: int64 }
     type Preview =
         { PackageId: string; ProfileId: string; ExePath: string; ExeHash: string
-          Rows: Row[]; Errors: string[]; Warnings: string[]; Advice: string; Components: GameComponents.Status[]
+          Rows: Row[]; Errors: string[]; Warnings: string[]; Advice: string; Components: GameComponents.Status[]; Versions: string[]
           BackupDirectory: string; WriteBytes: int64; BackupBytes: int64; Token: string }
 
     let evidence gameDir exe (package: Package) =
@@ -100,9 +100,11 @@ module PackagePlanning =
         if facts.Apis.Length > 1 then warnings.Add("检测到多个图形 API；请确认游戏启动时使用所选路线的 API / Multiple APIs found; confirm the game's launch mode.")
         let excluded = profile.Files |> Array.filter (GameComponents.deploys profile >> not) |> Array.map (fun f -> f.Component) |> Array.distinct
         if excluded.Length > 0 then warnings.Add("未启用的可选组件 / Excluded optional components: " + String.Join(", ", excluded) + "；适配条件尚未验证 / Compatibility conditions have not been verified.")
-        warnings.Add("保留已有 seed 配置；这可能需要手动检查 ReShade 加载配置 / Existing seed settings are kept and may need ReShade configuration review.")
+        warnings.Add("保留已有配置；请检查组件开关与加载设置 / Existing settings are kept; review component switches and loading configuration.")
         warnings.Add("逐游戏挂载点与全局驱动设置不会自动应用；本预览仅按清单部署 / Per-game hook overrides and global driver settings are not applied.")
         let files = profile.Files |> Array.filter (GameComponents.deploys profile)
+        if (files |> Array.exists (fun f -> f.Target="OptiScaler.ini" && f.Policy="seed")) && File.Exists(Path.Combine(root,"OptiScaler.ini")) then
+            warnings.Add("已有 OptiScaler.ini 将保留；使用神经渲染需确认 [DlssNr] 中 Enabled=true / Confirm NR is enabled in your existing Aurora settings.")
         let mirrors = profile.Mirrors |> Array.filter (fun path -> Directory.Exists(Path.Combine(root, path)))
         let allFiles =
             [| yield! files
@@ -110,6 +112,15 @@ module PackagePlanning =
                    for f in files do
                        if f.Target.StartsWith("033-runtime/", StringComparison.OrdinalIgnoreCase) then
                            yield { f with Target = mirror + "/" + f.Target } |]
+        if package.Manifest.Provenance.Length > 0 then
+            warnings.Add("在线组合使用所选 Release；游戏版本、驱动和组件之间的兼容性仍需实机验证 / Online component combinations require in-game verification.")
+            let consumerPattern = "(?i)^(renodx-dlss.*\\.addon64|nvngx\\.dll\\.addon64|033-engine\\.dll|OptiScaler\\.dll)$"
+            for folder in [|root; Path.Combine(root,"host64"); Path.Combine(root,"033-runtime"); Path.Combine(root,"033-runtime","host64","033-runtime")|] do
+                if Directory.Exists(folder) then
+                    for path in Directory.EnumerateFiles(folder) do
+                        if System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),consumerPattern) &&
+                           not (allFiles |> Array.exists (fun f -> (RuntimePackages.resolve root f.Target).Equals(path,StringComparison.OrdinalIgnoreCase))) then
+                            errors.Add("发现其他神经渲染组件，请先处理或还原现有安装 / Competing neural component: " + Path.GetRelativePath(root,path))
         let seen = Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
         let rows = [| for file in allFiles do
                         try
@@ -154,7 +165,7 @@ module PackagePlanning =
         let exeHash = DeploymentSafety.hashFile exe
         let tokenData = JsonSerializer.Serialize((package.Id, profile.Id, exe, exeHash, rows, facts, components, warnings.ToArray(), backupDirectory))
         { PackageId = package.Id; ProfileId = profile.Id; ExePath = exe; ExeHash = exeHash
-          Rows = rows; Errors = errors.ToArray(); Warnings = warnings.ToArray(); Advice = advice facts package; Components = components
+          Rows = rows; Errors = errors.ToArray(); Warnings = warnings.ToArray(); Advice = advice facts package; Components = components; Versions = package.Manifest.Provenance
           BackupDirectory = backupDirectory; WriteBytes = writes; BackupBytes = backups
           Token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tokenData))) }
 
@@ -162,6 +173,7 @@ module PackagePlanning =
         let mib n = float n / 1048576.0
         String.Join("\n", [|
             yield sprintf "运行包 / Package: %s\n路线 / Route: %s" (preview.PackageId.Substring(0, 12)) preview.ProfileId
+            for version in preview.Versions do yield "[组件版本 / Component version] " + version
             yield "目标 / Target: " + preview.ExePath
             yield "备份 / Backups: " + preview.BackupDirectory
             yield sprintf "写入 / Writes: %.1f MiB · 原件备份 / Originals: %.1f MiB（另需临时副本 / plus staging）" (mib preview.WriteBytes) (mib preview.BackupBytes)

@@ -19,4 +19,4 @@ jobs:
       - name: Build desktop app and compile XAML
         run: dotnet build "DLSS 5 MANAGER.fsproj" --configuration Debug
       - name: Run file and PE regressions without a GPU or payload
-        run: dotnet fsi --exec tests/RegressionTests.fsx
+        run: dotnet fsi --exec tests/ComponentTests.fsx

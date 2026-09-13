@@ -18,7 +18,7 @@ module RuntimePackages =
         { Id: string; Architecture: string; Files: PayloadFile[]; Apis: string[]
           NativeUpscaler: string; Dx12Runtime: string; EngineMarkers: string[]
           ExecutableNames: string[]; Mirrors: string[]; Protocol: string; RequiredComponents: string[] }
-    type Manifest = { Version: string; Profiles: Profile[]; Notices: (string * string)[] }
+    type Manifest = { Version: string; Profiles: Profile[]; Notices: (string * string)[]; Provenance: string[] }
     type Package =
         { Id: string; Root: string; Manifest: Manifest }
         member this.Display = sprintf "%s · %s · %d routes" this.Manifest.Version (this.Id.Substring(0, 12)) this.Manifest.Profiles.Length
@@ -100,7 +100,9 @@ module RuntimePackages =
             let source = relativePath (str n "Source")
             if not (source.StartsWith("notices/", StringComparison.OrdinalIgnoreCase)) then invalidOp "Notices must be inside notices/."
             source, checksum (str n "Hash"))
-        { Version = version; Profiles = profiles; Notices = notices }
+        let provenance = strings root "Provenance"
+        if provenance.Length > 32 || (provenance |> Array.exists (fun s -> isNull s || s.Length > 2048)) then invalidOp "Invalid component provenance."
+        { Version = version; Profiles = profiles; Notices = notices; Provenance = provenance }
 
     let private sources manifest =
         let refs = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -218,3 +220,43 @@ module RuntimePackages =
                 { package with Root = final }
         finally
             if Directory.Exists(stage) then Directory.Delete(stage, true)
+
+    /// Materialize a selected component combination as another immutable package version.
+    let compose store version (profile: Profile) (files: (PayloadFile * string)[]) (notices: (string * string)[]) (provenance: string[]) =
+        Directory.CreateDirectory(store) |> ignore
+        let staging = Path.Combine(store,".compose-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(staging) |> ignore
+        try
+            let prepared = files |> Array.mapi (fun i (file, source) ->
+                let relative = sprintf "payload/%04d-%s" i (Path.GetFileName(file.Target))
+                let destination = resolve staging relative
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)) |> ignore
+                File.Copy(source,destination)
+                let prepared = {file with Source=relative}
+                verifyFile staging prepared |> ignore
+                prepared)
+            let noticeRefs = notices |> Array.map (fun (relative,source) ->
+                let relative = relativePath relative
+                if not (relative.StartsWith("notices/",StringComparison.Ordinal)) then invalidOp "Invalid composed notice path."
+                let destination = resolve staging relative
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)) |> ignore
+                File.Copy(source,destination)
+                {| Source=relative;Hash=DeploymentSafety.hashFile destination |})
+            let route =
+                {| Id=profile.Id; Architecture=profile.Architecture; Files=prepared
+                   Suitability={| Apis=profile.Apis;NativeUpscaler=profile.NativeUpscaler;Dx12Runtime=profile.Dx12Runtime;EngineMarkers=profile.EngineMarkers |}
+                   ExecutableNames=profile.ExecutableNames;MirrorDirectories=profile.Mirrors;Protocol=profile.Protocol;RequiredComponents=profile.RequiredComponents |}
+            let bytes = JsonSerializer.SerializeToUtf8Bytes({| Kind="033-managed-package";Schema=1;Version=version;Profiles=[|route|];Notices=noticeRefs;Provenance=provenance |})
+            let manifest = parse (Encoding.UTF8.GetString(bytes))
+            let id = manifestId bytes
+            File.WriteAllBytes(Path.Combine(staging,"033-package.json"),bytes)
+            let destination = Path.Combine(store,id)
+            if Directory.Exists(destination) then
+                let existing = load store id
+                verify existing
+                existing
+            else
+                Directory.Move(staging,destination)
+                { Id=id;Root=destination;Manifest=manifest }
+        finally
+            if Directory.Exists(staging) then Directory.Delete(staging,true)
