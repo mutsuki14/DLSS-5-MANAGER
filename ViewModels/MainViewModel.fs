@@ -228,10 +228,6 @@ type MainViewModel() as this =
     let mutable isSettingsOpen = false
     let mutable totalGamesCount = 0
 
-    /// The community section. Built with the window so the tab can switch to it
-    /// instantly; it does not touch the network until the tab is opened.
-    let community = CommunityViewModel()
-
     // ---- Manage sheet state ---------------------------------------------
     let mutable isManageOpen = false
     let mutable manageCard: GameCardViewModel option = None
@@ -858,65 +854,28 @@ type MainViewModel() as this =
                 this.RaisePropertyChanged("IsEmulatorsViewVisible")
                 this.RaisePropertyChanged("IsGamesTabActive")
                 this.RaisePropertyChanged("IsEmulatorsTabActive")
-                this.RaisePropertyChanged("IsCommunityViewVisible")
-                this.RaisePropertyChanged("IsCommunityTabActive")
                 this.RaisePropertyChanged("SearchPlaceholder")
-
-                // The community grid is server-side, so it is fetched the first
-                // time the section is opened and never before - a user who
-                // never goes there makes no network call at all.
-                if value = "community" then
-                    community.ApplyQuery(searchText)
-                    community.EnsureLoaded()
 
     member this.IsSettingsOpen
         with get () = isSettingsOpen
         and set value = this.ActiveSection <- (if value then "settings" else "games")
 
-    /// One box, four jobs - it says which one it is doing right now.
+    /// One box, three jobs - it says which one it is doing right now.
     member this.SearchPlaceholder =
         match activeSection with
         | "settings" -> "Search settings..."
         | "emulators" -> "Search emulators..."
-        | "community" -> "Search community..."
         | _ -> "Search games..."
 
     member this.IsGamesViewVisible = activeSection = "games"
     member this.IsEmulatorsViewVisible = activeSection = "emulators"
-    member this.IsCommunityViewVisible = activeSection = "community"
     member this.IsGamesTabActive = activeSection = "games"
     member this.IsEmulatorsTabActive = activeSection = "emulators"
-    member this.IsCommunityTabActive = activeSection = "community"
-
-    /// The community section's own state. Exposed so the window can bind to it
-    /// as `Community.X` rather than mirroring three dozen properties here.
-    member _.Community = community
 
     member this.OpenSettings() = this.ActiveSection <- "settings"
     member this.CloseSettings() = this.ActiveSection <- "games"
     member this.ShowGames() = this.ActiveSection <- "games"
     member this.ShowEmulators() = this.ActiveSection <- "emulators"
-    member this.ShowCommunity() = this.ActiveSection <- "community"
-
-    /// "Share result" in the Manage sheet. The post is built from the install
-    /// this app made, so the route, API, bit-width and add-ons are already
-    /// filled in and the user only picks the verdict.
-    member this.ShareToCommunity() =
-        match manageCard with
-        | Some card ->
-            this.IsManageOpen <- false
-
-            community.OpenComposer(
-                card.Game,
-                isOverlayEnabled,
-                ModInstaller.modeKey installMode,
-                ModInstaller.optiApiKey optiApi,
-                ModInstaller.archKey installArch,
-                useNeuralAddon
-            )
-
-            this.ActiveSection <- "community"
-        | None -> ()
 
     member this.ToggleSettings() =
         this.ActiveSection <- (if activeSection = "settings" then "games" else "settings")
@@ -936,11 +895,7 @@ type MainViewModel() as this =
                 filterEmulatorsList ()
                 this.RaisePropertyChanged("HasGames")
                 this.RaisePropertyChanged("HasEmulators")
-                // The same box filters whichever page is open. The community
-                // list is filtered by the server, so it only re-queries while
-                // that section is the one on screen.
                 this.RaiseSettingsFilter()
-                if activeSection = "community" then community.ApplyQuery(value)
 
     // ---------------------------------------------------------------------
     // COLLAPSIBLE SETTINGS SECTIONS
@@ -1303,6 +1258,13 @@ type MainViewModel() as this =
     member this.ManageStreamlineText = manageStreamlineText
 
     member this.HasExecutable = not (String.IsNullOrWhiteSpace(manageExePath))
+    member _.GameRequirementsText =
+        try
+            let markers = GameComponents.reEngineMarkers manageExePath
+            if markers.Length = 0 then ""
+            else "RE Engine · REFramework\n检测到 / Detected: " + String.Join(", ", markers) + "\n请导入 033 运行包并点击“分析适配”，使用含 REFramework 的 RE 专用路线。已有不同版本的 dinput8.dll 会提示冲突。 / Import a package and choose Recommend to review an RE route with REFramework."
+        with _ -> "无法检查游戏的组件需求，请检查 EXE 路径与读取权限 / Cannot inspect component requirements; check the executable path and read access."
+    member this.HasGameRequirements = this.GameRequirementsText <> ""
 
     member this.IsAnalyzing
         with get () = isAnalyzing
@@ -1773,6 +1735,8 @@ type MainViewModel() as this =
         this.RaisePropertyChanged("ManageDlssText")
         this.RaisePropertyChanged("ManageStreamlineText")
         this.RaisePropertyChanged("HasExecutable")
+        this.RaisePropertyChanged("GameRequirementsText")
+        this.RaisePropertyChanged("HasGameRequirements")
 
     /// Paints the sheet from a cached deep-scan record - no disk walking.
     member private this.ApplyAnalysis(analysis: AnalysisStore.GameAnalysis) =
@@ -1998,13 +1962,15 @@ type MainViewModel() as this =
         and set value =
             if not packageBusy && this.SetProperty(&selectedRuntimeProfile, value) then this.ClearPackagePreview()
     member _.PackageAdvice = packageAdvice
+    member _.PackageComponentsText = packagePreview |> Option.map (fun p -> GameComponents.format p.Components) |> Option.defaultValue ""
+    member _.HasPackageComponents = packagePreview |> Option.exists (fun p -> p.Components.Length > 0)
     member _.PackagePreviewText = packagePreview |> Option.map PackagePlanning.format |> Option.defaultValue ""
     member _.HasPackagePreview = packagePreview.IsSome
     member this.CanConfirmPackage = this.IsManageReady && (packagePreview |> Option.exists (fun p -> p.Errors.Length = 0))
     member private this.ClearPackagePreview() =
         packagePreview <- None
         packageAdvice <- ""
-        for name in ["PackageAdvice"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
+        for name in ["PackageAdvice"; "PackageComponentsText"; "HasPackageComponents"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
     member private this.SetPackageBusy(value: bool) =
         packageBusy <- value
         this.RaisePropertyChanged("PackageBusy")
@@ -2062,7 +2028,7 @@ type MainViewModel() as this =
                         this.SelectedRuntimeProfile <- preview.ProfileId
                         packagePreview <- Some preview
                         packageAdvice <- preview.Advice
-                        for name in ["PackageAdvice"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
+                        for name in ["PackageAdvice"; "PackageComponentsText"; "HasPackageComponents"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
                     | Error error ->
                         this.InstallResultIsError <- true
                         this.InstallResultText <- "预览失败 / Preview failed: " + error)) |> ignore

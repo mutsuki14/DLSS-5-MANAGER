@@ -10,7 +10,7 @@ open System.Text.RegularExpressions
 module UpdateChecker =
 
     [<Literal>]
-    let CurrentVersion = "1.2.0-fork.1"
+    let CurrentVersion = "1.2.0-fork.2"
 
     [<Literal>]
     let ReleasesApiUrl = "https://api.github.com/repos/mutsuki14/DLSS-5-MANAGER/releases"

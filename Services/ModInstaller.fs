@@ -2140,6 +2140,8 @@ module ModInstaller =
     /// Cheap, non-mutating checks, also run BEFORE removing an old route.
     let preflight (exePath: string) (mode: InstallMode) (arch: InstallArch) (api: OptiScalerApi) =
         [| yield! HealthCheck.selectionIssues exePath (modeKey mode) (archKey arch) (optiApiKey api)
+           if (GameComponents.reEngineMarkers exePath).Length > 0 then
+               yield "RE Engine：请导入含 REFramework 的 033 运行包，选择 RE 专用路线并预览 / Import a package with REFramework and preview its RE-specific route."
            if HealthCheck.runningGame exePath then yield "Close the game before changing its files."
            let root = modFilesRoot ()
            if String.IsNullOrWhiteSpace(root) then yield "The mod files folder is missing next to the application."

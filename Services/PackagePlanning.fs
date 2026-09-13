@@ -18,7 +18,7 @@ module PackagePlanning =
           BeforeHash: string; Action: string; Bytes: int64; BeforeBytes: int64 }
     type Preview =
         { PackageId: string; ProfileId: string; ExePath: string; ExeHash: string
-          Rows: Row[]; Errors: string[]; Warnings: string[]; Advice: string
+          Rows: Row[]; Errors: string[]; Warnings: string[]; Advice: string; Components: GameComponents.Status[]
           BackupDirectory: string; WriteBytes: int64; BackupBytes: int64; Token: string }
 
     let evidence gameDir exe (package: Package) =
@@ -34,6 +34,8 @@ module PackagePlanning =
         let native = GameAnalyzer.findDlssFolders gameDir exe |> List.exists (fun folder -> folder.Files |> List.exists (fun f -> f.Name.Equals("nvngx_dlss.dll", StringComparison.OrdinalIgnoreCase)))
         let markers = package.Manifest.Profiles |> Array.collect (fun p -> p.EngineMarkers) |> Array.distinct
                       |> Array.filter (fun name -> File.Exists(Path.Combine(root, name)))
+        // Normalize chunk variants so RE games cannot fall through to a generic route.
+        let markers = if (GameComponents.reEngineMarkers exe).Length > 0 then Array.append markers [|"re_chunk_000.pak"|] |> Array.distinct else markers
         let antiCheat = (rule |> Option.exists (fun r -> r.AntiCheat)) ||
                         [|"EasyAntiCheat"; "EasyAntiCheat_EOS"; "BattlEye"; "ACE"; "AntiCheatExpert"|]
                         |> Array.exists (fun name -> Directory.Exists(Path.Combine(root, name)) || Directory.Exists(Path.Combine(gameDir, name)))
@@ -46,6 +48,9 @@ module PackagePlanning =
         let expected = if profile.Architecture = "x86" then "32" else "64"
         { ProfileId = profile.Id
           Reasons = [|
+            for dependency in GameComponents.requirements profile do yield! dependency.Errors
+            if GameComponents.isReRoute profile && not (Array.contains "re_chunk_000.pak" facts.EngineMarkers) then
+                yield "缺少 RE 引擎证据，不能部署 REFramework / No RE Engine evidence for REFramework."
             if facts.Architecture <> expected then yield "游戏位数与路线不符 / Architecture mismatch."
             if facts.Apis.Length = 0 then yield "尚未识别图形 API，请选择真实游戏 EXE / Graphics API unknown; select the game executable."
             elif not (facts.Apis |> Array.exists (fun api -> profile.Apis |> Array.contains api)) then yield "图形 API 与路线不符 / Graphics API mismatch."
@@ -69,6 +74,8 @@ module PackagePlanning =
             if facts.NativeDlss then "发现 nvngx_dlss.dll；文件存在不证明游戏正在使用 DLSS / DLSS file found; active use is unverified."
             else "扫描未发现原生 DLSS 文件；动态加载或扫描权限可能影响判断 / No native DLSS found in scanned folders."
             "匹配候选 / Candidates: " + (if candidates.Length = 0 then "无 / none" else String.Join(", ", candidates |> Array.map (fun p -> p.ProfileId)))
+            if Array.contains "re_chunk_000.pak" facts.EngineMarkers then
+                "RE Engine：选择包含 REFramework 的 RE 专用路线 / Select an RE-specific route with REFramework."
             "适配结论来自静态证据，尚未进行游戏内验证 / Static evidence only; not tested in game."
         |])
 
@@ -91,10 +98,11 @@ module PackagePlanning =
         if HealthCheck.runningGame exe then errors.Add("请先关闭游戏 / Close the game before installation.")
         let warnings = ResizeArray<string>()
         if facts.Apis.Length > 1 then warnings.Add("检测到多个图形 API；请确认游戏启动时使用所选路线的 API / Multiple APIs found; confirm the game's launch mode.")
-        if profile.Files |> Array.exists (fun f -> f.Component <> "") then warnings.Add("可选多帧转接件暂不部署：尚未验证显卡与游戏帧生成条件 / Optional frame-generation components are excluded pending GPU/game checks.")
+        let excluded = profile.Files |> Array.filter (GameComponents.deploys profile >> not) |> Array.map (fun f -> f.Component) |> Array.distinct
+        if excluded.Length > 0 then warnings.Add("未启用的可选组件 / Excluded optional components: " + String.Join(", ", excluded) + "；适配条件尚未验证 / Compatibility conditions have not been verified.")
         warnings.Add("保留已有 seed 配置；这可能需要手动检查 ReShade 加载配置 / Existing seed settings are kept and may need ReShade configuration review.")
         warnings.Add("逐游戏挂载点与全局驱动设置不会自动应用；本预览仅按清单部署 / Per-game hook overrides and global driver settings are not applied.")
-        let files = profile.Files |> Array.filter (fun f -> f.Component = "")
+        let files = profile.Files |> Array.filter (GameComponents.deploys profile)
         let mirrors = profile.Mirrors |> Array.filter (fun path -> Directory.Exists(Path.Combine(root, path)))
         let allFiles =
             [| yield! files
@@ -122,6 +130,21 @@ module PackagePlanning =
                                     BeforeHash = before; Action = action; Bytes = FileInfo(source).Length
                                     BeforeBytes = if before = "" then 0L else FileInfo(target).Length }
                         with ex -> errors.Add(ex.Message) |]
+        let components = GameComponents.requirements profile |> Array.map (fun dependency ->
+            let componentRows = rows |> Array.filter (fun r -> dependency.Files |> Array.exists (fun f -> f.Target = r.RelativeTarget))
+            let blocked = dependency.Errors.Length > 0 || componentRows.Length <> dependency.Files.Length
+            let conflict = dependency.Id = "reframework" && (componentRows |> Array.exists (fun r -> r.Action = "replace"))
+            let unchanged = componentRows.Length > 0 && (componentRows |> Array.forall (fun r -> r.Action = "same" || r.Action = "keep"))
+            let status: GameComponents.Status =
+                { Name = dependency.Name; Reason = dependency.Reason
+                  State = if blocked then "缺失或无效 / Missing or invalid" elif conflict then "冲突 / Conflict" elif unchanged then "与运行包一致，将保留 / Matches package; kept" else "随路线安装 / Included in installation"
+                  Detail = String.Join("\n", [|
+                      yield! dependency.Errors
+                      if blocked && dependency.Errors.Length = 0 then yield "文件校验失败，见下方阻止原因 / File validation failed; see the blocked reasons below."
+                      if conflict then yield "已有不同的 dinput8.dll；先还原或手动处理现有模组，再重新预览 / Resolve the existing dinput8.dll before retrying."
+                      for f in dependency.Files do yield f.Target + " · SHA-256 " + f.Hash.Substring(0, 16)
+                  |]) }
+            status)
         let changed = rows |> Array.filter (fun r -> r.Action = "add" || r.Action = "replace")
         let writes = changed |> Array.sumBy (fun r -> r.Bytes)
         let backups = changed |> Array.sumBy (fun r -> r.BeforeBytes)
@@ -129,9 +152,9 @@ module PackagePlanning =
         let largest = changed |> Array.map (fun r -> r.Bytes) |> Array.append [|0L|] |> Array.max
         errors.AddRange(spaceErrors [|root, writes + largest; backupDirectory, backups * 2L|])
         let exeHash = DeploymentSafety.hashFile exe
-        let tokenData = JsonSerializer.Serialize((package.Id, profile.Id, exe, exeHash, rows, facts, warnings.ToArray(), backupDirectory))
+        let tokenData = JsonSerializer.Serialize((package.Id, profile.Id, exe, exeHash, rows, facts, components, warnings.ToArray(), backupDirectory))
         { PackageId = package.Id; ProfileId = profile.Id; ExePath = exe; ExeHash = exeHash
-          Rows = rows; Errors = errors.ToArray(); Warnings = warnings.ToArray(); Advice = advice facts package
+          Rows = rows; Errors = errors.ToArray(); Warnings = warnings.ToArray(); Advice = advice facts package; Components = components
           BackupDirectory = backupDirectory; WriteBytes = writes; BackupBytes = backups
           Token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tokenData))) }
 
@@ -142,6 +165,8 @@ module PackagePlanning =
             yield "目标 / Target: " + preview.ExePath
             yield "备份 / Backups: " + preview.BackupDirectory
             yield sprintf "写入 / Writes: %.1f MiB · 原件备份 / Originals: %.1f MiB（另需临时副本 / plus staging）" (mib preview.WriteBytes) (mib preview.BackupBytes)
+            if preview.Components.Length > 0 then
+                yield "必需组件 / Required components:\n" + GameComponents.format preview.Components
             for warning in preview.Warnings do yield "[提示 / Note] " + warning
             for error in preview.Errors do yield "[阻止 / Blocked] " + error
             yield ""

@@ -17,7 +17,7 @@ module RuntimePackages =
     type Profile =
         { Id: string; Architecture: string; Files: PayloadFile[]; Apis: string[]
           NativeUpscaler: string; Dx12Runtime: string; EngineMarkers: string[]
-          ExecutableNames: string[]; Mirrors: string[]; Protocol: string }
+          ExecutableNames: string[]; Mirrors: string[]; Protocol: string; RequiredComponents: string[] }
     type Manifest = { Version: string; Profiles: Profile[]; Notices: (string * string)[] }
     type Package =
         { Id: string; Root: string; Manifest: Manifest }
@@ -86,11 +86,15 @@ module RuntimePackages =
                 let suit = p.GetProperty("Suitability")
                 let native = str suit "NativeUpscaler"
                 if native <> "present" && native <> "absent" then invalidOp "Unknown native upscaler requirement."
+                let required = strings p "RequiredComponents"
+                if required.Length > 32 || (required |> Array.exists (fun id -> isNull id || not (Regex.IsMatch(id, "^[a-z0-9][a-z0-9-]{0,79}$")))) ||
+                   (required |> Array.distinct).Length <> required.Length then invalidOp "Invalid or duplicate required component ID."
                 { Id = id; Architecture = arch; Files = files; Apis = strings suit "Apis"
                   NativeUpscaler = native; Dx12Runtime = str suit "Dx12Runtime"
                   EngineMarkers = strings suit "EngineMarkers" |> Array.map relativePath
                   ExecutableNames = strings p "ExecutableNames" |> Array.map relativePath
-                  Mirrors = strings p "MirrorDirectories" |> Array.map relativePath; Protocol = str p "Protocol" })
+                  Mirrors = strings p "MirrorDirectories" |> Array.map relativePath; Protocol = str p "Protocol"
+                  RequiredComponents = required })
         if profiles.Length = 0 || profiles.Length > 128 then invalidOp "Invalid route count."
         let notices = arr root "Notices" |> Array.map (fun n ->
             let source = relativePath (str n "Source")

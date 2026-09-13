@@ -4,6 +4,7 @@
 #load "../Services/DeploymentSafety.fs"
 #load "../Services/CompatibilityRules.fs"
 #load "../Services/RuntimePackages.fs"
+#load "../Services/GameComponents.fs"
 #load "../Services/GameAnalyzer.fs"
 #load "../Services/HealthCheck.fs"
 #load "../Services/PackagePlanning.fs"
@@ -454,6 +455,105 @@ test "Compatibility explains unknown APIs, bitness mismatch, native DX11 and ant
         equal true ((PackagePlanning.assess invalid profile).Reasons.Length > 0)
     let native = {profile with Apis=[|"dx11"|];NativeUpscaler="present"}
     equal true ((PackagePlanning.assess {facts with Apis=[|"dx11"|];NativeDlss=true} native).Reasons |> Array.exists (fun r -> r.Contains("unsupported")))))
+
+// REFramework is a required route dependency, including older manifests without Component tags.
+let reFixture folder tagged transform =
+    let zip, _ = packageFixture folder "re-components" (fun entries ->
+        entries |> Array.map (fun ((path: string),bytes) ->
+            if not (path.EndsWith("033-package.json")) then path,bytes
+            else
+                let doc = System.Text.Json.Nodes.JsonNode.Parse(bytes)
+                let profile = doc.["Profiles"].[0]
+                profile.["Id"] <- System.Text.Json.Nodes.JsonValue.Create("re-nodlss-x64")
+                profile.["Suitability"].["EngineMarkers"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"re_chunk_000.pak\"]")
+                let loader = profile.["Files"].[3]
+                loader.["Target"] <- System.Text.Json.Nodes.JsonValue.Create("dinput8.dll")
+                loader.["Role"] <- System.Text.Json.Nodes.JsonValue.Create("mod-loader")
+                loader.["Component"] <- System.Text.Json.Nodes.JsonValue.Create(if tagged then "reframework" else "")
+                if tagged then profile.["RequiredComponents"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"reframework\"]")
+                transform profile
+                path,Encoding.UTF8.GetBytes(doc.ToJsonString())))
+    RuntimePackages.importZip (Path.Combine(folder,"packages")) zip ignore
+let reGame game exe =
+    makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+    write (Path.Combine(game,"re_chunk_001.pak.patch_002.pak")) "RE engine data" |> ignore
+
+test "RE chunk variants select the dedicated route; DLL names alone do not identify the engine" (fun () -> tempTest (fun game backup ->
+    let exe = makePe (Path.Combine(game,"game.exe")) 0x8664 true [|"d3d12.dll"|] false
+    write (Path.Combine(game,"dinput8.dll")) "unrelated loader" |> ignore
+    equal [||] (GameComponents.reEngineMarkers exe)
+    reGame game exe
+    let package = reFixture backup false ignore
+    let facts = PackagePlanning.evidence game exe package
+    equal 0 (PackagePlanning.assess facts package.Manifest.Profiles.[0]).Reasons.Length
+    let generic = importFixture backup "generic"
+    equal true ((PackagePlanning.assess (PackagePlanning.evidence game exe generic) generic.Manifest.Profiles.[0]).Reasons.Length > 0)
+    equal true (ModInstaller.preflight exe ModInstaller.Dx12Auto ModInstaller.Bit64 ModInstaller.OptiDx12 |> Array.exists (fun e -> e.Contains("REFramework")))))
+
+test "RE route without its loader is blocked even if a foreign dinput8.dll exists" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        reGame game exe
+        let dll = write (Path.Combine(game,"dinput8.dll")) "unknown existing loader"
+        let package = reFixture backup false (fun p -> p.["Files"].AsArray().RemoveAt(3))
+        let preview = ModInstaller.previewPackage item exe package "re-nodlss-x64"
+        equal true (preview.Errors |> Array.exists (fun e -> e.Contains("missing REFramework")))
+        equal "缺失或无效 / Missing or invalid" preview.Components.[0].State
+        equal false (ModInstaller.installPackage item package preview (fun _ _ -> ())).Success
+        equal "unknown existing loader" (File.ReadAllText(dll)))))
+
+test "Bundled and explicitly tagged REFramework install and restore with the route" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        reGame game exe
+        Directory.CreateDirectory(Path.Combine(game,"reframework/autorun")) |> ignore
+        let script = write (Path.Combine(game,"reframework/autorun/user.lua")) "user mod"
+        for tagged in [false;true] do
+            let package = reFixture backup tagged ignore
+            let preview = ModInstaller.previewPackage item exe package "re-nodlss-x64"
+            equal [||] preview.Errors
+            equal "随路线安装 / Included in installation" preview.Components.[0].State
+            equal true (PackagePlanning.format preview |> fun t -> t.Contains("REFramework"))
+            equal true (ModInstaller.installPackage item package preview (fun _ _ -> ())).Success
+            equal true (File.Exists(Path.Combine(game,"dinput8.dll")))
+            equal true (ModInstaller.uninstall item exe None (fun _ _ -> ())).Success
+            equal false (File.Exists(Path.Combine(game,"dinput8.dll")))
+            equal "user mod" (File.ReadAllText(script)))))
+
+test "Matching pre-existing REFramework stays unowned and survives route restore" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        reGame game exe
+        let package = reFixture backup false ignore
+        let loader = package.Manifest.Profiles.[0].Files |> Array.find (fun f -> f.Target = "dinput8.dll")
+        let dll = Path.Combine(game,"dinput8.dll")
+        File.Copy(RuntimePackages.resolve package.Root loader.Source,dll)
+        let preview = ModInstaller.previewPackage item exe package "re-nodlss-x64"
+        equal [||] preview.Errors
+        equal "与运行包一致，将保留 / Matches package; kept" preview.Components.[0].State
+        equal true (ModInstaller.installPackage item package preview (fun _ _ -> ())).Success
+        equal true (ModInstaller.uninstall item exe None (fun _ _ -> ())).Success
+        equal loader.Hash (hash dll))))
+
+test "REFramework conflicts and changes after review prevent all writes" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        reGame game exe
+        let package = reFixture backup true ignore
+        let clean = ModInstaller.previewPackage item exe package "re-nodlss-x64"
+        let dll = write (Path.Combine(game,"dinput8.dll")) "another mod version"
+        equal false (ModInstaller.installPackage item package clean (fun _ _ -> ())).Success
+        let conflict = ModInstaller.previewPackage item exe package "re-nodlss-x64"
+        equal "冲突 / Conflict" conflict.Components.[0].State
+        equal false (ModInstaller.installPackage item package conflict (fun _ _ -> ())).Success
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll")))
+        equal "another mod version" (File.ReadAllText(dll)))))
+
+test "Invalid REFramework declarations and unknown required components cannot bypass checks" (fun () -> tempTest (fun game backup ->
+    let exe = makePe (Path.Combine(game,"game.exe")) 0x8664 true [|"d3d12.dll"|] false
+    reGame game exe
+    for field,value in ["Policy","seed";"Role","entry"] do
+        let package = reFixture backup true (fun p -> p.["Files"].[3].[field] <- System.Text.Json.Nodes.JsonValue.Create(value))
+        equal true ((PackagePlanning.create game exe backup false package "re-nodlss-x64").Errors.Length > 0)
+    let package = reFixture backup true (fun p -> p.["RequiredComponents"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"mfg2030\"]"))
+    equal true ((PackagePlanning.create game exe backup false package "re-nodlss-x64").Errors |> Array.exists (fun e -> e.Contains("Unsupported required component")))
+    rejects (fun () -> reFixture backup true (fun p -> p.["RequiredComponents"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"reframework\",\"reframework\"]")) |> ignore)))
 
 printfn "\n%d passed, %d failed" passed failed
 if failed > 0 then exit 1

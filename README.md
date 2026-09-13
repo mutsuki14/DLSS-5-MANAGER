@@ -52,6 +52,10 @@ The checkout does not include the `mod files` runtime payload. Building the mana
 
 Import a schema 1 033 ZIP from the game management window, inspect compatibility evidence, review every planned file change, then confirm deployment. Package versions are stored separately; restore the current installation before selecting another version. See [运行包、适配建议与安装预览](docs/runtime-packages.md) for scope, limitations and validation.
 
+### Game-specific components
+
+The fork removes the community tab, report/comment composer and community network service. RE Engine games now show their REFramework requirement in Manage. The imported package preview checks the dedicated RE route, shows required component files and conflicts, and restores only files the manager actually deployed. Existing matching loaders and user scripts remain intact. See the [component guide](docs/runtime-packages.md#游戏专用组件reframework).
+
 ### Fork preview downloads
 
 Windows x64 setup and self-contained portable ZIP: [mutsuki14 fork releases](https://github.com/mutsuki14/DLSS-5-MANAGER/releases). The original application's authorship remains NODIX TECH / Numidia Studios. These packages contain the manager; import your own 033 ZIP after installation.

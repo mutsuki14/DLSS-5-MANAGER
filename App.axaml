@@ -225,60 +225,6 @@
         </Style>
 
         <!-- Utility Action Buttons (Pure Translucent Glass - matches the app shell) -->
-        <!-- COMMUNITY: the game card in the grid. A bare button so the whole
-             card is one click target; the border inside does the painting. -->
-        <Style Selector="Button.CommunityCard">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="Transitions">
-                <Transitions>
-                    <DoubleTransition Property="Opacity" Duration="0:0:0.15" />
-                </Transitions>
-            </Setter>
-        </Style>
-        <Style Selector="Button.CommunityCard:pointerover /template/ ContentPresenter">
-            <Setter Property="Background" Value="Transparent" />
-        </Style>
-        <Style Selector="Button.CommunityCard:pointerover Border">
-            <Setter Property="BorderBrush" Value="#45FFFFFF" />
-        </Style>
-        <Style Selector="Button.CommunityCard:pressed">
-            <Setter Property="Opacity" Value="0.75" />
-        </Style>
-
-        <!-- COMMUNITY: the route tally chips and the emoji buttons. Both are
-             wrappers with no chrome of their own. -->
-        <Style Selector="Button.RouteChip">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-        </Style>
-        <Style Selector="Button.RouteChip:pointerover /template/ ContentPresenter">
-            <Setter Property="Background" Value="Transparent" />
-        </Style>
-        <Style Selector="Button.RouteChip:pointerover Border">
-            <Setter Property="BorderBrush" Value="#55FFFFFF" />
-        </Style>
-
-        <Style Selector="Button.EmojiBtn">
-            <Setter Property="Background" Value="#0AFFFFFF" />
-            <Setter Property="BorderBrush" Value="#18FFFFFF" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="9" />
-            <Setter Property="Padding" Value="9,4" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="Transitions">
-                <Transitions>
-                    <BrushTransition Property="Background" Duration="0:0:0.12" />
-                </Transitions>
-            </Setter>
-        </Style>
-        <Style Selector="Button.EmojiBtn:pointerover /template/ ContentPresenter">
-            <Setter Property="Background" Value="#1AFFFFFF" />
-            <Setter Property="BorderBrush" Value="#33FFFFFF" />
-        </Style>
-
         <Style Selector="Button.EmptyActionBtn">
             <Setter Property="Focusable" Value="False" />
             <Setter Property="Background">
