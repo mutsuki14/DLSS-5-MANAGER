@@ -51,3 +51,9 @@ The checkout does not include the `mod files` runtime payload. Building the mana
 ### Imported runtime packages (fork development)
 
 Import a schema 1 033 ZIP from the game management window, inspect compatibility evidence, review every planned file change, then confirm deployment. Package versions are stored separately; restore the current installation before selecting another version. See [运行包、适配建议与安装预览](docs/runtime-packages.md) for scope, limitations and validation.
+
+### Fork preview downloads
+
+Windows x64 setup and self-contained portable ZIP: [mutsuki14 fork releases](https://github.com/mutsuki14/DLSS-5-MANAGER/releases). The original application's authorship remains NODIX TECH / Numidia Studios. These packages contain the manager; import your own 033 ZIP after installation.
+
+The release workflow builds from the development branch when `release/release.json` changes, tests the app and installer on Windows, verifies uploaded assets, then publishes a prerelease in this fork. It never merges `main`. For a local Windows build with .NET 8 and Inno Setup 6, run `pwsh ./release/build-windows.ps1` from a fresh checkout.

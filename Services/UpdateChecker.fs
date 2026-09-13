@@ -6,20 +6,20 @@ open System.Text.Json
 open System.Text.RegularExpressions
 
 /// Compares the running build against the published GitHub releases and points
-/// the user at the official download page when a newer version exists.
+/// the user at this fork's download page when a newer version exists.
 module UpdateChecker =
 
     [<Literal>]
-    let CurrentVersion = "1.2.0"
+    let CurrentVersion = "1.2.0-fork.1"
 
     [<Literal>]
-    let ReleasesApiUrl = "https://api.github.com/repos/NODIX-TECH/DLSS-5-MANAGER/releases"
+    let ReleasesApiUrl = "https://api.github.com/repos/mutsuki14/DLSS-5-MANAGER/releases"
 
     [<Literal>]
-    let ReleasesPageUrl = "https://github.com/NODIX-TECH/DLSS-5-MANAGER/releases"
+    let ReleasesPageUrl = "https://github.com/mutsuki14/DLSS-5-MANAGER/releases"
 
     [<Literal>]
-    let DownloadPageUrl = "https://dlss5manager.numidiastudios.com"
+    let DownloadPageUrl = "https://github.com/mutsuki14/DLSS-5-MANAGER/releases"
 
     type UpdateResult =
         { HasUpdate: bool
