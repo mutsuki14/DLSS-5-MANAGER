@@ -411,7 +411,7 @@ test "Package deploy and restore retain original binaries, user settings and unr
         let package = importFixture backup "fixture"
         let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
         equal [||] preview.Errors
-        equal "replace" (preview.Rows |> Array.find (fun r -> r.Target = original)).Action
+        equal "replace" (preview.Rows |> Array.find (fun r -> r.Target = Path.GetFullPath(original))).Action
         let outcome = ModInstaller.installPackage item package preview (fun _ _ -> ())
         if not outcome.Success then failwith outcome.Message
         equal true (File.Exists(manifest))
