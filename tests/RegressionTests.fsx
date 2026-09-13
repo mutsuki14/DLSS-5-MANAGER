@@ -34,7 +34,7 @@ let tempTest action =
         for p in Directory.GetFiles(dir, "*", SearchOption.AllDirectories) do
             try File.SetAttributes(p, FileAttributes.Normal) with _ -> ()
         Directory.Delete(dir, true)
-let write path text = File.WriteAllText(path, text); path
+let write (path: string) (text: string) = File.WriteAllText(path, text); path
 let hash = DeploymentSafety.hashFile
 
 // Real PE fixtures with import RVAs in a section, not embedded string scanning.
