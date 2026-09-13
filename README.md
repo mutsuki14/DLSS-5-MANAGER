@@ -57,3 +57,5 @@ Import a schema 1 033 ZIP from the game management window, inspect compatibility
 Windows x64 setup and self-contained portable ZIP: [mutsuki14 fork releases](https://github.com/mutsuki14/DLSS-5-MANAGER/releases). The original application's authorship remains NODIX TECH / Numidia Studios. These packages contain the manager; import your own 033 ZIP after installation.
 
 The release workflow builds from the development branch when `release/release.json` changes, tests the app and installer on Windows, verifies uploaded assets, then publishes a prerelease in this fork. It never merges `main`. For a local Windows build with .NET 8 and Inno Setup 6, run `pwsh ./release/build-windows.ps1` from a fresh checkout.
+
+If packaging passes but publishing fails, `release/verified-build.json` can identify the original release workflow run and commit. Updating that file runs the publication-only workflow: it checks the successful Windows build job, downloads its immutable artifact, verifies provenance and checksums, and publishes those exact bytes without rebuilding. Existing published releases are not overwritten.
