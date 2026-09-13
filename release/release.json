@@ -3,5 +3,6 @@
   "version": "1.2.0-fork.1",
   "fileVersion": "1.2.0.1",
   "name": "DLSS 5 MANAGER v1.2.0-fork.1 · 033 集成预览版",
-  "prerelease": true
+  "prerelease": true,
+  "buildRevision": 2
 }
