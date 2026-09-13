@@ -25,3 +25,25 @@ All cached metadata, custom layouts, and configuration backups are safely stored
 
 ```cmd
 %LOCALAPPDATA%\DLSS5Manager\
+```
+
+### Development: health checks and protected restore
+
+The development branch adds a **Game health check** panel to Manage:
+
+- Inspect PE architecture and normal/delay-loaded graphics imports before choosing a route.
+- Import `managed/game_rules.json` from an extracted 033 package for advisory game-specific API, mount and anti-cheat notes.
+- Inspect bounded runtime log tails and export a local text report.
+- Verify SHA-256 ownership and original backups before restore. Keep changed settings/logs; stop on changed binaries or damaged backups.
+- Restore files touched by a failed install attempt, including failed repairs and known files written by ReShade setup.
+
+中文说明与融合范围：[游戏体检与安全恢复](docs/health-check-and-restore.md)。
+
+Build and run the regression suite with the .NET 8 SDK:
+
+```sh
+dotnet build "DLSS 5 MANAGER.fsproj" --configuration Debug
+dotnet fsi --exec tests/RegressionTests.fsx
+```
+
+The checkout does not include the `mod files` runtime payload. Building the manager does not download or manufacture those binaries. Existing upstream authorship and copyright remain unchanged.

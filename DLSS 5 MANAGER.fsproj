@@ -48,7 +48,11 @@
     <Compile Include="Models\GameItem.fs" />
     <Compile Include="Services\Localization.fs" />
     <Compile Include="Services\ExtrasStore.fs" />
+    <Compile Include="Services\PeInspection.fs" />
+    <Compile Include="Services\DeploymentSafety.fs" />
+    <Compile Include="Services\CompatibilityRules.fs" />
     <Compile Include="Services\GameAnalyzer.fs" />
+    <Compile Include="Services\HealthCheck.fs" />
     <Compile Include="Services\IconExtractor.fs" />
     <Compile Include="Services\GameScanner.fs" />
     <Compile Include="Services\EmulatorCatalog.fs" />

@@ -1786,6 +1786,22 @@
                             </StackPanel>
                         </Border>
 
+                        <Border Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="{Binding Loc.HealthCheck}" Foreground="#E2E8F0" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding Loc.HealthDescription}" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Loc.HealthChecking}" IsVisible="{Binding IsCheckingHealth}" Foreground="#E2E8F0" FontSize="11" />
+                                <WrapPanel Orientation="Horizontal">
+                                    <Button Content="{Binding Loc.HealthCheck}" Click="OnHealthCheckClicked" IsEnabled="{Binding IsManageReady}" Margin="0,0,8,6" />
+                                    <Button Content="{Binding Loc.ImportRules}" Click="OnImportRulesClicked" IsEnabled="{Binding IsManageReady}" Margin="0,0,8,6" />
+                                    <Button Content="{Binding Loc.ExportHealth}" Click="OnExportHealthClicked" IsVisible="{Binding HasHealthReport}" IsEnabled="{Binding IsManageReady}" Margin="0,0,0,6" />
+                                </WrapPanel>
+                                <ScrollViewer MaxHeight="240" IsVisible="{Binding HasHealthReport}">
+                                    <SelectableTextBlock Text="{Binding HealthReport}" FontSize="11" Foreground="#CBD5E1" TextWrapping="Wrap" />
+                                </ScrollViewer>
+                            </StackPanel>
+                        </Border>
+
                         <!-- Install route: OptiScaler is recommended; the ReShade routes are exclusive with it -->
                         <Border IsVisible="{Binding IsGameTarget}" Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13">
                             <StackPanel Spacing="10">

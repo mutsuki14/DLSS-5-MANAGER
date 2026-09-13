@@ -96,6 +96,11 @@ module Localization =
                 | _ -> key
 
         member _.Code = code
+        member _.HealthCheck = get "health_check"
+        member _.HealthDescription = get "health_description"
+        member _.HealthChecking = get "health_checking"
+        member _.ExportHealth = get "export_health"
+        member _.ImportRules = get "import_rules"
 
         // ---- Header / navigation ----------------------------------------
         member _.ClickManage = get "click_manage"

@@ -829,6 +829,45 @@ type MainWindow() as this =
             |> Async.StartImmediate
         | _ -> ()
 
+    member this.OnHealthCheckClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.RunHealthCheck()
+        | _ -> ()
+
+    member this.OnImportRulesClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady ->
+            async {
+                try
+                    let fileType = FilePickerFileType("033 game rules (*.json)", Patterns = [|"*.json"|])
+                    let options = FilePickerOpenOptions(Title = vm.Loc.ImportRules, AllowMultiple = false, FileTypeFilter = [|fileType|])
+                    let! files = this.StorageProvider.OpenFilePickerAsync(options) |> Async.AwaitTask
+                    if files <> null && files.Count > 0 then vm.ImportGameRules(files.[0].Path.LocalPath)
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not open rules: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
+    member this.OnExportHealthClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady && vm.HasHealthReport ->
+            let report = vm.HealthReport
+            async {
+                try
+                    let options = FilePickerSaveOptions(Title = vm.Loc.ExportHealth, SuggestedFileName = "dlss5-health.txt", DefaultExtension = "txt")
+                    let! file = this.StorageProvider.SaveFilePickerAsync(options) |> Async.AwaitTask
+                    if file <> null then
+                        use! stream = file.OpenWriteAsync() |> Async.AwaitTask
+                        stream.SetLength(0L)
+                        use writer = new System.IO.StreamWriter(stream, System.Text.UTF8Encoding(false))
+                        do! writer.WriteAsync(report) |> Async.AwaitTask
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not export report: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
     member this.OnInstallDlssClicked(sender: obj, e: RoutedEventArgs) =
         match this.DataContext with
         | :? MainViewModel as vm -> vm.StartInstall()

@@ -244,6 +244,8 @@ type MainViewModel() as this =
     let mutable manageStreamlineText = "Checking..."
     let mutable isAnalyzing = false
     let mutable isInstalling = false
+    let mutable isCheckingHealth = false
+    let mutable healthReport = ""
     let mutable isModInstalled = false
     let mutable dlss5Present = false
     let mutable dlss5Complete = false
@@ -1308,7 +1310,7 @@ type MainViewModel() as this =
                 this.RaiseDlss5State()
 
     /// Buttons are only live when nothing is running.
-    member this.IsManageReady = not isInstalling && not isAnalyzing
+    member this.IsManageReady = not isInstalling && not isAnalyzing && not isCheckingHealth
 
     /// The three install routes. They are mutually exclusive - OptiScaler and
     /// ReShade cannot hook the same game at the same time.
@@ -1492,6 +1494,9 @@ type MainViewModel() as this =
             this.RaiseInstallModeState()
 
     member private this.RaiseInstallModeState() =
+        healthReport <- ""
+        this.RaisePropertyChanged("HealthReport")
+        this.RaisePropertyChanged("HasHealthReport")
         this.RaisePropertyChanged("IsOptiScalerMode")
         this.RaisePropertyChanged("IsDx12Mode")
         this.RaisePropertyChanged("IsDx11Mode")
@@ -1520,12 +1525,17 @@ type MainViewModel() as this =
         | "dx11" -> "DirectX 11"
         | "dx10" -> "DirectX 10"
         | "dx9" -> "DirectX 9"
-        | _ -> "Unknown API"
+        | "dx8" -> "DirectX 8"
+        | "ddraw" -> "DirectDraw"
+        | "vulkan" -> "Vulkan"
+        | "opengl" -> "OpenGL"
+        | _ -> "Unknown / multiple APIs"
 
     member this.DetectedArchText =
         match detectedArch with
         | "32" -> "32-bit"
         | "64" -> "64-bit"
+        | "arm64" -> "ARM64"
         | _ -> ""
 
     /// Folds the executable / ReShade / DLSS / Streamline readout away.
@@ -1590,11 +1600,13 @@ type MainViewModel() as this =
             let mode =
                 if detectedApi = "dx9" then ModInstaller.Dx9
                 elif detectedApi = "dx10" then ModInstaller.Dx11
-                elif detectedDlss then ModInstaller.OptiScalerMode
                 elif detectedApi = "dx11" then ModInstaller.Dx11
+                elif detectedApi = "vulkan" || detectedDlss then ModInstaller.OptiScalerMode
                 else ModInstaller.Dx12Auto
 
             this.ApplyInstallMode(mode)
+            if mode = ModInstaller.OptiScalerMode then
+                this.SetOptiApi(if detectedApi = "vulkan" then ModInstaller.OptiVulkan else ModInstaller.OptiDx12)
             this.SetInstallArch(if detectedArch = "32" then ModInstaller.Bit32 else ModInstaller.Bit64)
 
     member this.InstallModeHintText =
@@ -1792,6 +1804,7 @@ type MainViewModel() as this =
 
         // The deep scan may have corrected the executable, so re-read what the
         // game is from the file we now believe in. Emulators have one route.
+        detectedFor <- ""
         if not isEmulatorTarget && not isAmdMode then this.DetectTarget(true)
 
     /// Re-runs the deep scan for the open game and refreshes the stored record.
@@ -1827,6 +1840,9 @@ type MainViewModel() as this =
                 try System.IO.Path.GetDirectoryName(card.ExecutablePath)
                 with _ -> card.InstallDirectory
 
+        healthReport <- ""
+        this.RaisePropertyChanged("HealthReport")
+        this.RaisePropertyChanged("HasHealthReport")
         this.InstallResultText <- ""
         this.InstallProgress <- 0.0
         this.InstallStatusText <- ""
@@ -1903,7 +1919,7 @@ type MainViewModel() as this =
             this.AnalyzeManageTarget()
 
     member this.CloseManage() =
-        if not isInstalling then
+        if not isInstalling && not isCheckingHealth then
             this.IsManageOpen <- false
             manageCard <- None
 
@@ -1912,6 +1928,10 @@ type MainViewModel() as this =
         | Some card when not (String.IsNullOrWhiteSpace(path)) ->
             card.SetExecutable(path)
             manageExePath <- path
+            detectedFor <- ""
+            healthReport <- ""
+            this.RaisePropertyChanged("HealthReport")
+            this.RaisePropertyChanged("HasHealthReport")
 
             manageFolder <-
                 try System.IO.Path.GetDirectoryName(path)
@@ -1922,13 +1942,59 @@ type MainViewModel() as this =
             this.AnalyzeManageTarget()
         | _ -> ()
 
+    member this.IsCheckingHealth = isCheckingHealth
+    member this.HealthReport = healthReport
+    member this.HasHealthReport = not (String.IsNullOrWhiteSpace(healthReport))
+
+    member this.RunHealthCheck() =
+        match manageCard with
+        | Some card when this.IsManageReady ->
+            let exe = manageExePath
+            let mode, arch, api = ModInstaller.modeKey installMode, ModInstaller.archKey installArch, ModInstaller.optiApiKey optiApi
+            isCheckingHealth <- true
+            this.RaisePropertyChanged("IsCheckingHealth")
+            this.RaisePropertyChanged("IsManageReady")
+            this.InstallStatusText <- loc.HealthChecking
+            System.Threading.Tasks.Task.Run(fun () ->
+                let result =
+                    try
+                        let findings =
+                            [| yield! HealthCheck.survey exe card.Game.InstallDirectory
+                               for issue in HealthCheck.selectionIssues exe mode arch api do
+                                   yield { HealthCheck.Finding.Level = "ERROR"; Code = "route"; Message = issue; Hint = "Choose a matching route before installation." }
+                               for issue in ModInstaller.restoreIssues card.Game exe do
+                                   yield { HealthCheck.Finding.Level = "ERROR"; Code = "restore"; Message = issue; Hint = "Keep the restore point and backups; review the changed files." } |]
+                        HealthCheck.formatReport card.Title exe mode arch api findings
+                    with ex -> "Health check could not finish: " + ex.Message
+                Dispatcher.UIThread.Post(fun () ->
+                    healthReport <- result
+                    isCheckingHealth <- false
+                    this.RaisePropertyChanged("IsCheckingHealth")
+                    this.InstallStatusText <- ""
+                    this.RaisePropertyChanged("IsManageReady")
+                    this.RaisePropertyChanged("HealthReport")
+                    this.RaisePropertyChanged("HasHealthReport"))) |> ignore
+        | _ -> ()
+
+    member this.ImportGameRules(path: string) =
+        if this.IsManageReady then
+            try
+                let count = CompatibilityRules.importFile path
+                this.InstallResultIsError <- false
+                this.InstallResultText <- sprintf "%d game rules imported. Package recommendations are advisory." count
+                detectedFor <- ""
+                this.DetectTarget(true)
+                this.RunHealthCheck()
+            with ex ->
+                this.InstallResultIsError <- true
+                this.InstallResultText <- "Could not import rules: " + ex.Message
+
     /// Switching routes is a removal followed by an install: OptiScaler and
     /// ReShade hook the same game in incompatible ways, so whatever the previous
     /// route put there - our ReShade included - comes out first.
     member this.StartSwitch() =
         match manageCard with
-        | None -> ()
-        | Some card ->
+        | Some card when this.IsManageReady ->
             let game = card.Game
             let exePath = manageExePath
             let target = installMode
@@ -1962,14 +2028,18 @@ type MainViewModel() as this =
             System.Threading.Tasks.Task.Run(fun () ->
                 let (succeeded, message) =
                     try
-                        let removal = ModInstaller.uninstall game exePath plan (scaled 0.0 0.33)
+                        let issues = ModInstaller.preflight exePath target targetArch targetApi
+                        let removal: ModInstaller.InstallOutcome =
+                            if issues.Length > 0 then
+                                { Success = false; Message = String.Join(Environment.NewLine, issues) }
+                            else ModInstaller.uninstall game exePath plan (scaled 0.0 0.33)
 
                         if not removal.Success then
                             (false, "Could not remove the previous install: " + removal.Message)
                         else
                             let outcome =
                                 ModInstaller.install game exePath plan target targetArch targetApi targetNeural targetOverlay (scaled 0.33 0.67)
-                            (outcome.Success, "Switched. " + outcome.Message)
+                            (outcome.Success, (if outcome.Success then "Switched. " else "Previous route removed; replacement failed. ") + outcome.Message)
                     with ex ->
                         (false, ex.Message)
 
@@ -1988,13 +2058,15 @@ type MainViewModel() as this =
 
                     this.AnalyzeManageTarget()))
             |> ignore
+        | _ -> ()
 
     member private this.RunModTask(isInstallAction: bool) =
         match manageCard with
-        | None -> ()
-        | Some card ->
+        | Some card when this.IsManageReady ->
             let game = card.Game
             let exePath = manageExePath
+            let selectedMode, selectedArch, selectedApi = installMode, installArch, optiApi
+            let selectedNeural, selectedOverlay = useNeuralAddon, this.OverlayOptions
 
             this.InstallResultText <- ""
             this.InstallResultIsError <- false
@@ -2020,7 +2092,7 @@ type MainViewModel() as this =
                     try
                         let outcome =
                             if isInstallAction then
-                                ModInstaller.install game exePath plan installMode installArch optiApi useNeuralAddon this.OverlayOptions report
+                                ModInstaller.install game exePath plan selectedMode selectedArch selectedApi selectedNeural selectedOverlay report
                             else
                                 ModInstaller.uninstall game exePath plan report
 
@@ -2043,6 +2115,7 @@ type MainViewModel() as this =
 
                     this.AnalyzeManageTarget()))
             |> ignore
+        | _ -> ()
 
     member this.StartInstall() = this.RunModTask(true)
     member this.StartUninstall() = this.RunModTask(false)

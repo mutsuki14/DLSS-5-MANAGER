@@ -1,0 +1,21 @@
+name: Validate manager
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build desktop app and compile XAML
+        run: dotnet build "DLSS 5 MANAGER.fsproj" --configuration Debug
+      - name: Run file and PE regressions without a GPU or payload
+        run: dotnet fsi --exec tests/RegressionTests.fsx

@@ -492,7 +492,7 @@ module GameAnalyzer =
 
     /// Folders the installer creates. Their contents describe the mod, not the game.
     let private modOwnedDirs =
-        HashSet<string>([ "host64"; "optiscaler"; "reshade-shaders" ], StringComparer.OrdinalIgnoreCase)
+        HashSet<string>([ "host64"; "optiscaler"; "reshade-shaders"; "033-runtime"; "_033transactions" ], StringComparer.OrdinalIgnoreCase)
 
     /// Every filename that says anything about the API, flattened once.
     let private apiMarkerNames =
@@ -511,7 +511,7 @@ module GameAnalyzer =
     /// "dx12" / "dx11" / "dx10" / "dx9", or "" when nothing gives it away.
     /// Looks beside the executable and one level down, which is where the
     /// Agility SDK keeps D3D12Core.dll.
-    let detectGraphicsApi (exePath: string) : string =
+    let private detectApiFromFiles (exePath: string) : string =
         try
             if String.IsNullOrWhiteSpace(exePath) then
                 ""
@@ -553,43 +553,28 @@ module GameAnalyzer =
         with _ ->
             ""
 
-    /// "32" / "64" straight from the COFF header's machine type - four bytes
-    /// read off the front of the file, no loading and no guessing.
+    /// Imports are evidence from the executable, whereas neighboring DLLs may
+    /// have been installed by a mod. Multiple imported APIs remain ambiguous.
+    let detectGraphicsApi (exePath: string) : string =
+        match PeInspection.inspect exePath with
+        | Some image when image.GraphicsApis.Length = 1 -> image.GraphicsApis.[0]
+        | Some image when image.GraphicsApis.Length > 1 -> ""
+        | _ ->
+            match CompatibilityRules.tryFind exePath with
+            | Some rule when rule.Api <> "" && rule.Api <> "dxgi" -> rule.Api
+            | _ -> detectApiFromFiles exePath
+
+    /// ARM64 is kept distinct: an ARM64 process cannot load an x64 payload.
     let detectArchitecture (exePath: string) : string =
-        try
-            use stream = File.OpenRead(exePath)
-            use reader = new BinaryReader(stream)
-
-            // "MZ", then the PE header offset lives at 0x3C.
-            if reader.ReadUInt16() <> 0x5A4Dus then
-                ""
-            else
-                stream.Position <- 0x3CL
-                let peOffset = int64 (reader.ReadInt32())
-
-                if peOffset <= 0L || peOffset + 6L > stream.Length then
-                    ""
-                else
-                    stream.Position <- peOffset
-
-                    if reader.ReadUInt32() <> 0x00004550u then // "PE\0\0"
-                        ""
-                    else
-                        match reader.ReadUInt16() with
-                        | 0x014Cus -> "32"
-                        | 0x8664us
-                        | 0xAA64us -> "64"
-                        | _ -> ""
-        with _ ->
-            ""
+        PeInspection.inspect exePath |> Option.map _.Architecture |> Option.defaultValue ""
 
     /// dxgi covers D3D10/11/12, which is what every DLSS title uses.
     let detectReShadeApi (exePath: string) : string =
         try
             let dir = Path.GetDirectoryName(exePath)
 
-            if File.Exists(Path.Combine(dir, "vulkan-1.dll")) then "vulkan"
-            elif File.Exists(Path.Combine(dir, "opengl32.dll")) then "opengl"
+            if detectGraphicsApi exePath = "vulkan" then "vulkan"
+            elif detectGraphicsApi exePath = "opengl" then "opengl"
             else "dxgi"
         with _ ->
             "dxgi"
