@@ -246,6 +246,14 @@ type MainViewModel() as this =
     let mutable isInstalling = false
     let mutable isCheckingHealth = false
     let mutable healthReport = ""
+    let runtimePackages = ObservableCollection<RuntimePackages.Package>(RuntimePackages.list (RuntimePackages.defaultStore ()))
+    let runtimeProfiles = ObservableCollection<string>()
+    let mutable selectedRuntimePackage: RuntimePackages.Package = Unchecked.defaultof<_>
+    let mutable selectedRuntimeProfile = ""
+    let mutable useManagedPackage = false
+    let mutable packagePreview: PackagePlanning.Preview option = None
+    let mutable packageAdvice = ""
+    let mutable packageBusy = false
     let mutable isModInstalled = false
     let mutable dlss5Present = false
     let mutable dlss5Complete = false
@@ -1310,7 +1318,7 @@ type MainViewModel() as this =
                 this.RaiseDlss5State()
 
     /// Buttons are only live when nothing is running.
-    member this.IsManageReady = not isInstalling && not isAnalyzing && not isCheckingHealth
+    member this.IsManageReady = not isInstalling && not isAnalyzing && not isCheckingHealth && not packageBusy
 
     /// The three install routes. They are mutually exclusive - OptiScaler and
     /// ReShade cannot hook the same game at the same time.
@@ -1643,14 +1651,14 @@ type MainViewModel() as this =
             // the game, so it is a switch like any other.
             || (this.IsNeuralAddonVisible && installedNeural <> useNeuralAddon))
 
-    member this.ShowInstallButton = not dlss5Present && not isInstalling
-    member this.ShowSwitchButton = this.IsSwitchingRoute && not isInstalling
+    member this.ShowInstallButton = this.LegacyControlsVisible && not dlss5Present && not isInstalling
+    member this.ShowSwitchButton = this.LegacyControlsVisible && this.IsSwitchingRoute && not isInstalling
 
     member this.ShowCompleteButton =
-        dlss5Present && not dlss5Complete && not this.IsSwitchingRoute && not isInstalling
+        this.LegacyControlsVisible && dlss5Present && not dlss5Complete && not this.IsSwitchingRoute && not isInstalling
 
     member this.ShowUninstallButton =
-        dlss5Present && dlss5Complete && not this.IsSwitchingRoute && not isInstalling
+        (this.IsManagedPackageInstalled || (useManagedPackage && isModInstalled) || (dlss5Present && dlss5Complete && not this.IsSwitchingRoute)) && not isInstalling
 
     /// Marks the route that is actually on the game right now, so browsing the
     /// other two never loses track of which one is live.
@@ -1693,7 +1701,9 @@ type MainViewModel() as this =
             "Switch to " + route + neural
 
     member this.ManageDlss5Text =
-        if not dlss5Present then loc.NotInstalled
+        if this.IsManagedPackageInstalled then
+            (if dlss5Complete then "运行包文件已部署（游戏内效果待验证） / Package deployed; rendering unverified" else "运行包文件缺失 / Package files missing") + " · " + installedRoute.Substring(8)
+        elif not dlss5Present then loc.NotInstalled
         elif dlss5Complete then (if isModInstalled then loc.Installed else loc.Installed + " (external)")
         else
             let missing = if isNull (box dlss5Missing) then [||] else dlss5Missing
@@ -1706,6 +1716,10 @@ type MainViewModel() as this =
         else SolidColorBrush(Color.Parse("#FBBF24")) :> IBrush
 
     member private this.RaiseDlss5State() =
+        this.RaisePropertyChanged("IsManagedPackageInstalled")
+        this.RaisePropertyChanged("InstalledRuntimePackageText")
+        this.RaisePropertyChanged("LegacyControlsVisible")
+        this.RaisePropertyChanged("CanConfirmPackage")
         this.RaisePropertyChanged("ShowInstallButton")
         this.RaisePropertyChanged("ShowSwitchButton")
         this.RaisePropertyChanged("ShowCompleteButton")
@@ -1762,6 +1776,7 @@ type MainViewModel() as this =
 
     /// Paints the sheet from a cached deep-scan record - no disk walking.
     member private this.ApplyAnalysis(analysis: AnalysisStore.GameAnalysis) =
+        this.ClearPackagePreview()
         manageAnalysis <- Some analysis
 
         let (route, arch) =
@@ -1829,6 +1844,7 @@ type MainViewModel() as this =
             |> ignore
 
     member this.OpenManage(card: GameCardViewModel) =
+        this.ClearPackagePreview()
         manageCard <- Some card
         manageAnalysis <- None
         manageTitle <- card.Title
@@ -1855,6 +1871,12 @@ type MainViewModel() as this =
         installedArch <- arch
         installedApi <- ModInstaller.installedOptiApi card.Game
         installedNeural <- ModInstaller.installedNeuralAddon card.Game
+        this.UseManagedPackage <- route.StartsWith("package:")
+        if this.UseManagedPackage then
+            runtimePackages |> Seq.tryFind (fun p -> p.Id = installedApi) |> Option.iter (fun p -> this.SelectedRuntimePackage <- p)
+            this.SelectedRuntimeProfile <- route.Substring(8)
+        elif isNull (box selectedRuntimePackage) && runtimePackages.Count > 0 then
+            this.SelectedRuntimePackage <- runtimePackages.[0]
 
         // Open on whatever the recorded install actually used, so the sheet
         // offers Remove rather than a switch to itself.
@@ -1919,13 +1941,14 @@ type MainViewModel() as this =
             this.AnalyzeManageTarget()
 
     member this.CloseManage() =
-        if not isInstalling && not isCheckingHealth then
+        if not isInstalling && not isCheckingHealth && not packageBusy then
             this.IsManageOpen <- false
             manageCard <- None
 
     member this.SetManageExecutable(path: string) =
         match manageCard with
-        | Some card when not (String.IsNullOrWhiteSpace(path)) ->
+        | Some card when this.IsManageReady && not (String.IsNullOrWhiteSpace(path)) ->
+            this.ClearPackagePreview()
             card.SetExecutable(path)
             manageExePath <- path
             detectedFor <- ""
@@ -1942,6 +1965,129 @@ type MainViewModel() as this =
             this.AnalyzeManageTarget()
         | _ -> ()
 
+    member _.PackageBusy = packageBusy
+    member _.RuntimePackages = runtimePackages
+    member _.RuntimeProfiles = runtimeProfiles
+    member _.IsManagedPackageInstalled = installedRoute.StartsWith("package:")
+    member this.InstalledRuntimePackageText =
+        if not this.IsManagedPackageInstalled then ""
+        else
+            let version = runtimePackages |> Seq.tryFind (fun p -> p.Id = installedApi) |> Option.map (fun p -> p.Manifest.Version) |> Option.defaultValue installedApi
+            "当前已安装 / Installed: " + version + " · " + installedRoute.Substring(8)
+    member this.LegacyControlsVisible = not useManagedPackage && not this.IsManagedPackageInstalled
+    member this.UseManagedPackage
+        with get () = useManagedPackage
+        and set value =
+            if this.IsManageReady && this.SetProperty(&useManagedPackage, value) then
+                this.ClearPackagePreview()
+                this.RaiseDlss5State()
+    member this.SelectedRuntimePackage
+        with get () = selectedRuntimePackage
+        and set value =
+            if not packageBusy then
+                selectedRuntimePackage <- value
+                runtimeProfiles.Clear()
+                if not (isNull (box value)) then
+                    for p in value.Manifest.Profiles do runtimeProfiles.Add(p.Id)
+                selectedRuntimeProfile <- if runtimeProfiles.Count > 0 then runtimeProfiles.[0] else ""
+                this.RaisePropertyChanged("SelectedRuntimePackage")
+                this.RaisePropertyChanged("SelectedRuntimeProfile")
+                this.ClearPackagePreview()
+    member this.SelectedRuntimeProfile
+        with get () = selectedRuntimeProfile
+        and set value =
+            if not packageBusy && this.SetProperty(&selectedRuntimeProfile, value) then this.ClearPackagePreview()
+    member _.PackageAdvice = packageAdvice
+    member _.PackagePreviewText = packagePreview |> Option.map PackagePlanning.format |> Option.defaultValue ""
+    member _.HasPackagePreview = packagePreview.IsSome
+    member this.CanConfirmPackage = this.IsManageReady && (packagePreview |> Option.exists (fun p -> p.Errors.Length = 0))
+    member private this.ClearPackagePreview() =
+        packagePreview <- None
+        packageAdvice <- ""
+        for name in ["PackageAdvice"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
+    member private this.SetPackageBusy(value: bool) =
+        packageBusy <- value
+        this.RaisePropertyChanged("PackageBusy")
+        this.RaisePropertyChanged("IsManageReady")
+        this.RaisePropertyChanged("CanConfirmPackage")
+
+    member this.ImportRuntimePackage(path: string) =
+        if this.IsManageReady then
+            this.ClearPackagePreview()
+            this.SetPackageBusy(true)
+            this.InstallResultText <- ""
+            this.InstallStatusText <- "读取并验证运行包 / Importing and verifying package..."
+            System.Threading.Tasks.Task.Run(fun () ->
+                let result =
+                    try Ok (RuntimePackages.importZip (RuntimePackages.defaultStore ()) path (fun text -> Dispatcher.UIThread.Post(fun () -> this.InstallStatusText <- text)))
+                    with ex -> Error ex.Message
+                Dispatcher.UIThread.Post(fun () ->
+                    this.SetPackageBusy(false)
+                    this.InstallStatusText <- ""
+                    match result with
+                    | Ok package ->
+                        if not (runtimePackages |> Seq.exists (fun p -> p.Id = package.Id)) then runtimePackages.Insert(0, package)
+                        this.SelectedRuntimePackage <- runtimePackages |> Seq.find (fun p -> p.Id = package.Id)
+                        this.UseManagedPackage <- true
+                        this.InstallResultIsError <- false
+                        this.InstallResultText <- sprintf "已验证 %d 条路线；版本独立保存。SHA-256 表示内容一致性，并非官方认证 / %d routes verified; versions stored separately. Hashes verify integrity, not publisher identity." package.Manifest.Profiles.Length package.Manifest.Profiles.Length
+                        this.PreviewRuntimePackage(true)
+                    | Error error ->
+                        this.InstallResultIsError <- true
+                        this.InstallResultText <- "导入失败 / Import failed: " + error)) |> ignore
+
+    /// Auto-select only an evidence-matched candidate. Manual selection keeps its own reasons.
+    member this.PreviewRuntimePackage(autoSelect: bool) =
+        match manageCard with
+        | Some card when this.IsManageReady && not (isNull (box selectedRuntimePackage)) ->
+            let package, profile, exe = selectedRuntimePackage, selectedRuntimeProfile, manageExePath
+            this.ClearPackagePreview()
+            this.SetPackageBusy(true)
+            this.InstallStatusText <- "分析适配并生成文件预览 / Analyzing compatibility and files..."
+            System.Threading.Tasks.Task.Run(fun () ->
+                let result =
+                    try
+                        let selected =
+                            if autoSelect then
+                                let facts = PackagePlanning.evidence card.Game.InstallDirectory exe package
+                                package.Manifest.Profiles |> Array.tryFind (fun p -> (PackagePlanning.assess facts p).Reasons.Length = 0) |> Option.map (fun p -> p.Id) |> Option.defaultValue profile
+                            else profile
+                        Ok (ModInstaller.previewPackage card.Game exe package selected)
+                    with ex -> Error ex.Message
+                Dispatcher.UIThread.Post(fun () ->
+                    this.SetPackageBusy(false)
+                    this.InstallStatusText <- ""
+                    match result with
+                    | Ok preview ->
+                        this.SelectedRuntimeProfile <- preview.ProfileId
+                        packagePreview <- Some preview
+                        packageAdvice <- preview.Advice
+                        for name in ["PackageAdvice"; "PackagePreviewText"; "HasPackagePreview"; "CanConfirmPackage"] do this.RaisePropertyChanged(name)
+                    | Error error ->
+                        this.InstallResultIsError <- true
+                        this.InstallResultText <- "预览失败 / Preview failed: " + error)) |> ignore
+        | _ -> ()
+
+    member this.ConfirmRuntimePackage() =
+        match manageCard, packagePreview with
+        | Some card, Some preview when this.CanConfirmPackage ->
+            let package = selectedRuntimePackage
+            this.ClearPackagePreview()
+            this.IsInstalling <- true
+            this.InstallProgress <- 0.0
+            this.InstallResultText <- ""
+            let report text progress = Dispatcher.UIThread.Post(fun () -> this.InstallStatusText <- text; this.InstallProgress <- progress * 100.0)
+            System.Threading.Tasks.Task.Run(fun () ->
+                let outcome = ModInstaller.installPackage card.Game package preview report
+                Dispatcher.UIThread.Post(fun () ->
+                    this.IsInstalling <- false
+                    this.InstallStatusText <- ""
+                    this.InstallResultIsError <- not outcome.Success
+                    this.InstallResultText <- outcome.Message
+                    card.RefreshModBadge()
+                    this.AnalyzeManageTarget())) |> ignore
+        | _ -> ()
+
     member this.IsCheckingHealth = isCheckingHealth
     member this.HealthReport = healthReport
     member this.HasHealthReport = not (String.IsNullOrWhiteSpace(healthReport))
@@ -1950,7 +2096,11 @@ type MainViewModel() as this =
         match manageCard with
         | Some card when this.IsManageReady ->
             let exe = manageExePath
-            let mode, arch, api = ModInstaller.modeKey installMode, ModInstaller.archKey installArch, ModInstaller.optiApiKey optiApi
+            let mode, arch, api =
+                if this.IsManagedPackageInstalled then installedRoute, installedArch, installedApi
+                elif useManagedPackage then "package:" + selectedRuntimeProfile, detectedArch, (if isNull (box selectedRuntimePackage) then "" else selectedRuntimePackage.Id)
+                else ModInstaller.modeKey installMode, ModInstaller.archKey installArch, ModInstaller.optiApiKey optiApi
+            let packageRoute = installedRoute.StartsWith("package:") || useManagedPackage
             isCheckingHealth <- true
             this.RaisePropertyChanged("IsCheckingHealth")
             this.RaisePropertyChanged("IsManageReady")
@@ -1960,7 +2110,7 @@ type MainViewModel() as this =
                     try
                         let findings =
                             [| yield! HealthCheck.survey exe card.Game.InstallDirectory
-                               for issue in HealthCheck.selectionIssues exe mode arch api do
+                               for issue in (if packageRoute then [||] else HealthCheck.selectionIssues exe mode arch api) do
                                    yield { HealthCheck.Finding.Level = "ERROR"; Code = "route"; Message = issue; Hint = "Choose a matching route before installation." }
                                for issue in ModInstaller.restoreIssues card.Game exe do
                                    yield { HealthCheck.Finding.Level = "ERROR"; Code = "restore"; Message = issue; Hint = "Keep the restore point and backups; review the changed files." } |]
@@ -1978,6 +2128,7 @@ type MainViewModel() as this =
 
     member this.ImportGameRules(path: string) =
         if this.IsManageReady then
+            this.ClearPackagePreview()
             try
                 let count = CompatibilityRules.importFile path
                 this.InstallResultIsError <- false
@@ -1994,7 +2145,7 @@ type MainViewModel() as this =
     /// route put there - our ReShade included - comes out first.
     member this.StartSwitch() =
         match manageCard with
-        | Some card when this.IsManageReady ->
+        | Some card when this.IsManageReady && this.LegacyControlsVisible ->
             let game = card.Game
             let exePath = manageExePath
             let target = installMode
@@ -2061,6 +2212,7 @@ type MainViewModel() as this =
         | _ -> ()
 
     member private this.RunModTask(isInstallAction: bool) =
+        this.ClearPackagePreview()
         match manageCard with
         | Some card when this.IsManageReady ->
             let game = card.Game
@@ -2117,7 +2269,8 @@ type MainViewModel() as this =
             |> ignore
         | _ -> ()
 
-    member this.StartInstall() = this.RunModTask(true)
+    member this.StartInstall() =
+        if this.LegacyControlsVisible then this.RunModTask(true)
     member this.StartUninstall() = this.RunModTask(false)
 
     // ---------------------------------------------------------------------

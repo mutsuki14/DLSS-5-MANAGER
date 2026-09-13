@@ -106,7 +106,7 @@ module HealthCheck =
             if occupied.Length > 0 then
                 findings.Add(finding "INFO" "occupied-slots" ("Existing proxy filenames: " + String.Join(", ", occupied)) "These may belong to the game or another mod. Filename alone does not prove ownership.")
             let logNames = [|"ReShade.log"; "OptiScaler.log"; "dlss5-feed.log"; "dlss5-033.log"; "033-framegen.log"|]
-            let logDirs = [|""; "host64"; "033-runtime"; Path.Combine("033-runtime", "host64")|]
+            let logDirs = [|""; "host64"; "033-runtime"; Path.Combine("033-runtime", "host64"); Path.Combine("033-runtime", "host64", "033-runtime"); Path.Combine("_storage_", "033-runtime")|]
             let mutable found = 0
             for dir in logDirs do
                 for name in logNames do

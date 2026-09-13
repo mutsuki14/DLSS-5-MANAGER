@@ -1684,8 +1684,9 @@
                 <!-- Dimming backdrop: click outside to dismiss -->
                 <Border Background="#96000000" PointerPressed="OnManageBackdropPressed" />
 
-                <Border Classes="GlassModalCard" Width="560" Padding="26,22"
-                        HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Border Classes="GlassModalCard" Width="620" Padding="26,22" MaxHeight="900" Margin="24"
+                        HorizontalAlignment="Center" VerticalAlignment="Stretch">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Spacing="18">
 
                         <!-- Header.
@@ -1802,6 +1803,38 @@
                             </StackPanel>
                         </Border>
 
+                        <Border Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="运行包管理 / Runtime packages" Foreground="#E2E8F0" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding InstalledRuntimePackageText}" IsVisible="{Binding IsManagedPackageInstalled}" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" />
+                                <TextBlock Text="导入 033 ZIP；各版本独立保存。更换已安装版本时，先还原，再预览目标版本。 / Import a 033 ZIP. Restore before switching installed versions."
+                                           Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" />
+                                <Button Content="导入 ZIP / Import ZIP" Click="OnImportRuntimePackageClicked" IsEnabled="{Binding IsManageReady}" />
+                                <CheckBox Content="使用导入的运行包 / Use imported package" IsChecked="{Binding UseManagedPackage}" IsEnabled="{Binding IsManageReady}" />
+                                <StackPanel Spacing="10" IsVisible="{Binding UseManagedPackage}">
+                                    <TextBlock Text="运行包版本 / Package version" Foreground="#94A3B8" FontSize="11" />
+                                    <ComboBox ItemsSource="{Binding RuntimePackages}" SelectedItem="{Binding SelectedRuntimePackage}" IsEnabled="{Binding IsManageReady}" HorizontalAlignment="Stretch">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate><TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis" /></DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                    <TextBlock Text="安装路线 / Route" Foreground="#94A3B8" FontSize="11" />
+                                    <ComboBox ItemsSource="{Binding RuntimeProfiles}" SelectedItem="{Binding SelectedRuntimeProfile}" IsEnabled="{Binding IsManageReady}" HorizontalAlignment="Stretch" />
+                                    <WrapPanel>
+                                        <Button Content="分析适配 / Recommend" Click="OnRecommendPackageClicked" IsEnabled="{Binding IsManageReady}" Margin="0,0,8,6" />
+                                        <Button Content="预览所选路线 / Preview" Click="OnPreviewPackageClicked" IsEnabled="{Binding IsManageReady}" Margin="0,0,0,6" />
+                                    </WrapPanel>
+                                    <SelectableTextBlock Text="{Binding PackageAdvice}" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" />
+                                    <ScrollViewer MaxHeight="280" IsVisible="{Binding HasPackagePreview}">
+                                        <SelectableTextBlock Text="{Binding PackagePreviewText}" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" />
+                                    </ScrollViewer>
+                                    <Button Content="确认按预览安装 / Confirm installation" Click="OnConfirmPackageClicked" IsVisible="{Binding HasPackagePreview}" IsEnabled="{Binding CanConfirmPackage}" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding InstallStatusText}" IsVisible="{Binding PackageBusy}" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <StackPanel Spacing="18" IsVisible="{Binding LegacyControlsVisible}">
                         <!-- Install route: OptiScaler is recommended; the ReShade routes are exclusive with it -->
                         <Border IsVisible="{Binding IsGameTarget}" Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13">
                             <StackPanel Spacing="10">
@@ -2005,6 +2038,8 @@
                             </Grid>
                         </Border>
 
+                        </StackPanel>
+
                         <!-- Live progress: proves the app is working, never frozen -->
                         <Border Background="#0CFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="1" CornerRadius="16" Padding="16,13"
                                 IsVisible="{Binding IsInstalling}">
@@ -2052,6 +2087,7 @@
                                     Content="{Binding Loc.RemoveDlss}" />
                         </Grid>
                     </StackPanel>
+                    </ScrollViewer>
                 </Border>
             </Panel>
 

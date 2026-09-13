@@ -829,6 +829,36 @@ type MainWindow() as this =
             |> Async.StartImmediate
         | _ -> ()
 
+    member this.OnImportRuntimePackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm when vm.IsManageReady ->
+            async {
+                try
+                    let fileType = FilePickerFileType("033 runtime package (*.zip)", Patterns = [|"*.zip"|])
+                    let options = FilePickerOpenOptions(Title = "导入运行包 / Import runtime package", AllowMultiple = false, FileTypeFilter = [|fileType|])
+                    let! files = this.StorageProvider.OpenFilePickerAsync(options) |> Async.AwaitTask
+                    if files <> null && files.Count > 0 then vm.ImportRuntimePackage(files.[0].Path.LocalPath)
+                with ex ->
+                    vm.InstallResultIsError <- true
+                    vm.InstallResultText <- "Could not open package: " + ex.Message
+            } |> Async.StartImmediate
+        | _ -> ()
+
+    member this.OnRecommendPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.PreviewRuntimePackage(true)
+        | _ -> ()
+
+    member this.OnPreviewPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.PreviewRuntimePackage(false)
+        | _ -> ()
+
+    member this.OnConfirmPackageClicked(sender: obj, e: RoutedEventArgs) =
+        match this.DataContext with
+        | :? MainViewModel as vm -> vm.ConfirmRuntimePackage()
+        | _ -> ()
+
     member this.OnHealthCheckClicked(sender: obj, e: RoutedEventArgs) =
         match this.DataContext with
         | :? MainViewModel as vm -> vm.RunHealthCheck()

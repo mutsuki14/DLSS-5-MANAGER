@@ -954,6 +954,17 @@ module ModInstaller =
               Missing = [| "Game executable" |]
               ManagedByApp = managed
               DlssnrLocations = [||] }
+        elif (installedMode game).StartsWith("package:", StringComparison.Ordinal) then
+            try
+                let manifest = JsonSerializer.Deserialize<InstallManifest>(File.ReadAllText(manifestPath game))
+                if not (String.Equals(Path.GetFullPath(manifest.ExecutablePath), Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase)) then invalidOp "Restore point belongs to a different executable."
+                let roots = [|game.InstallDirectory; Path.GetDirectoryName(exePath)|] |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let missing = [| for file in manifest.Files do
+                                    DeploymentSafety.validatePath roots file.TargetPath
+                                    if not (File.Exists(file.TargetPath)) then yield file.TargetPath |]
+                { Present = true; Complete = missing.Length = 0; Missing = missing; ManagedByApp = true
+                  DlssnrLocations = manifest.Files |> Array.filter (fun f -> Path.GetFileName(f.TargetPath) = dlssnrFileName && File.Exists(f.TargetPath)) |> Array.map (fun f -> Path.GetDirectoryName(f.TargetPath)) }
+            with ex -> { Present = true; Complete = false; Missing = [|ex.Message|]; ManagedByApp = true; DlssnrLocations = [||] }
         else
             let exeDir = Path.GetDirectoryName(exePath)
             let dlssDirs = if isNull (box dlssDirs) then [||] else dlssDirs
@@ -2156,7 +2167,8 @@ module ModInstaller =
 
     let install game exePath plan mode arch optiApi neural overlay report : InstallOutcome =
         try
-            let issues = preflight exePath mode arch optiApi
+            let issues = [| yield! preflight exePath mode arch optiApi
+                            if (installedMode game).StartsWith("package:") then yield "Restore the managed package before installing another route." |]
             if issues.Length > 0 then { Success = false; Message = String.Join(Environment.NewLine, issues) }
             else
                 use operationLock = DeploymentSafety.acquireLock (backupRoot game)
@@ -2173,6 +2185,49 @@ module ModInstaller =
                                 (if errors.Length = 0 then "Files touched by this attempt were restored."
                                  else "Recovery incomplete; backups retained. " + String.Join(Environment.NewLine, errors)) }
         with ex -> { Success = false; Message = "Installation stopped: " + ex.Message }
+
+    /// A preview is immutable, tied to package content and current game bytes.
+    let previewPackage (game: GameItem) exe (package: RuntimePackages.Package) profile =
+        let fresh = RuntimePackages.load (Directory.GetParent(package.Root).FullName) package.Id
+        let backups = Path.Combine(appDataRoot (), "Backups", safeId game)
+        PackagePlanning.create game.InstallDirectory exe backups (isInstalled game) fresh profile
+
+    let installPackage (game: GameItem) (package: RuntimePackages.Package) (reviewed: PackagePlanning.Preview) (report: Progress) : InstallOutcome =
+        try
+            use operationLock = DeploymentSafety.acquireLock (backupRoot game)
+            if reviewed.Errors.Length > 0 then invalidOp "The reviewed plan contains blocking issues."
+            use gameLease = File.Open(reviewed.ExePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+            let fresh = previewPackage game reviewed.ExePath package reviewed.ProfileId
+            if fresh.Errors.Length > 0 then invalidOp (String.Join("\n", fresh.Errors))
+            if fresh.Token <> reviewed.Token then invalidOp "预览已过期，文件或适配条件发生变化。请重新预览 / The preview is stale; review a new plan."
+            let tracker = Tracker(managedRoots game reviewed.ExePath, backupRoot game, [||])
+            try
+                for i in 0 .. fresh.Rows.Length - 1 do
+                    let row = fresh.Rows.[i]
+                    if HealthCheck.runningGame reviewed.ExePath then invalidOp "Close the game before changing files."
+                    DeploymentSafety.validatePath (managedRoots game reviewed.ExePath) row.Target
+                    if DeploymentSafety.hashFile row.Target <> row.BeforeHash then invalidOp ("Target changed after preview: " + row.RelativeTarget)
+                    if row.Action = "add" || row.Action = "replace" then
+                        if DeploymentSafety.hashFile row.Source <> row.SourceHash then invalidOp ("Package changed after preview: " + row.RelativeTarget)
+                        report ("部署 / Deploy: " + row.RelativeTarget) (float i / float fresh.Rows.Length)
+                        tracker.Copy(row.Source, row.Target)
+                        if DeploymentSafety.hashFile row.Target <> row.SourceHash then invalidOp ("Deployed checksum mismatch: " + row.RelativeTarget)
+                let profile = package.Manifest.Profiles |> Array.find (fun p -> p.Id = reviewed.ProfileId)
+                let manifest =
+                    { GameId = safeId game; GameTitle = game.Title; ExecutablePath = reviewed.ExePath
+                      InstalledAtUtc = DateTime.UtcNow.ToString("o"); Mode = "package:" + reviewed.ProfileId
+                      Arch = if profile.Architecture = "x86" then "32" else "64"
+                      Api = package.Id; Neural = ""; Files = tracker.Entries }
+                DeploymentSafety.writeJsonAtomic (manifestPath game) manifest
+                tracker.Commit()
+                try report "部署完成 / Deployment complete" 1.0 with _ -> ()
+                { Success = true; Message = "运行包已部署，原件备份已保存。请在游戏内验证效果 / Package deployed with verified backups; in-game verification is still required." }
+            with ex ->
+                if tracker.IsCommitted then { Success = true; Message = "Deployment saved. " + ex.Message }
+                else
+                    let errors = tracker.Rollback()
+                    { Success = false; Message = ex.Message + "\n" + (if errors.Length = 0 then "本次改动已还原 / This attempt was rolled back." else "还原未完成，保留备份 / Recovery incomplete: " + String.Join("\n", errors)) }
+        with ex -> { Success = false; Message = "安装已停止 / Installation stopped: " + ex.Message }
 
     // =====================================================================
     // UNINSTALL

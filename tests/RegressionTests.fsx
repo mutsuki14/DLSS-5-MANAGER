@@ -3,8 +3,10 @@
 #load "../Services/PeInspection.fs"
 #load "../Services/DeploymentSafety.fs"
 #load "../Services/CompatibilityRules.fs"
+#load "../Services/RuntimePackages.fs"
 #load "../Services/GameAnalyzer.fs"
 #load "../Services/HealthCheck.fs"
+#load "../Services/PackagePlanning.fs"
 #load "../Services/EmulatorCatalog.fs"
 #load "../Services/ModInstaller.fs"
 
@@ -281,6 +283,177 @@ test "Switch preflight detects missing payload without touching the game" (fun (
     // The source checkout has no mod files payload.
     if issues.Length = 0 then failwith "Missing payload accepted"
     equal originalHash (hash exe)))
+
+// Declarative ZIP import and review-before-write coverage. No supplied binaries execute.
+open System.IO.Compression
+open System.Security.Cryptography
+
+let digest (bytes: byte[]) = Convert.ToHexString(SHA256.HashData(bytes))
+let packageJson (version: string) (files: RuntimePackages.PayloadFile[]) =
+    let profile =
+        {| Id="legacy-dx12-x64"; Architecture="x64"; Files=files
+           Suitability={|Apis=[|"dx12"|];NativeUpscaler="absent";Dx12Runtime="any"|}
+           MirrorDirectories=[|"_storage_"|] |}
+    let notice = {|Source="notices/LICENSE.txt";Hash=digest (Encoding.UTF8.GetBytes("license"))|}
+    JsonSerializer.Serialize({| Kind="033-managed-package"; Schema=1; Version=version; Profiles=[|profile|]; Notices=[|notice|] |})
+let zipBytes (path: string) (entries: (string * byte[])[]) =
+    use archive = ZipFile.Open(path, ZipArchiveMode.Create)
+    for name, bytes in entries do
+        let entry = archive.CreateEntry(name)
+        use stream = entry.Open()
+        stream.Write(bytes, 0, bytes.Length)
+    path
+let packageFixture folder version transform =
+    let binary = makePe (Path.Combine(folder, "fixture.dll")) 0x8664 true [||] false |> File.ReadAllBytes
+    let settings = Encoding.UTF8.GetBytes("default settings")
+    let payload source target bytes policy role componentName : RuntimePackages.PayloadFile =
+        { Source=source;Target=target;Hash=digest bytes;Architecture=(if role="config" then "" else "x64")
+          Policy=policy;Role=role;Component=componentName }
+    let files = [| payload "payload/hook.dll" "dxgi.dll" binary "replace" "entry" ""
+                   payload "payload/core.dll" "033-runtime/core.dll" binary "replace" "engine" ""
+                   payload "payload/settings.ini" "ReShade.ini" settings "seed" "config" ""
+                   payload "payload/optional.dll" "version.dll" binary "replace" "fg-bridge-loader" "mfg2030" |]
+    let json = packageJson version files
+    let entries = [| "bundle/033-package.json",Encoding.UTF8.GetBytes(json)
+                     "bundle/payload/hook.dll",binary; "bundle/payload/core.dll",binary
+                     "bundle/payload/settings.ini",settings; "bundle/payload/optional.dll",binary
+                     "bundle/notices/LICENSE.txt",Encoding.UTF8.GetBytes("license")
+                     "bundle/installer.ps1",Encoding.UTF8.GetBytes("throw 'must not run'") |]
+    zipBytes (Path.Combine(folder,Guid.NewGuid().ToString("N")+".zip")) (transform entries), files
+let importFixture folder version =
+    let zip, _ = packageFixture folder version id
+    RuntimePackages.importZip (Path.Combine(folder,"packages")) zip ignore
+
+test "ZIP import retains versions and notices, excludes installer scripts, and deduplicates" (fun () -> tempTest (fun _ backup ->
+    let first = importFixture backup "version-one"
+    let again = importFixture backup "version-one"
+    let second = importFixture backup "version-two"
+    equal first.Id again.Id
+    equal false (first.Id = second.Id)
+    equal 2 (RuntimePackages.list (Path.Combine(backup,"packages"))).Length
+    equal "license" (File.ReadAllText(Path.Combine(first.Root,"notices/LICENSE.txt")))
+    equal false (File.Exists(Path.Combine(first.Root,"installer.ps1")))))
+test "ZIP traversal, Windows aliases, ADS and duplicate paths are rejected" (fun () -> tempTest (fun _ backup ->
+    for path in ["../escape.dll";"C:/escape.dll";"/absolute.dll";"payload/NUL.dll";"payload/x.dll:stream";"payload/trailing. "] do
+        let zip, _ = packageFixture backup "invalid" (fun entries -> Array.append entries [|path,[|1uy|]|])
+        rejects (fun () -> RuntimePackages.importZip (Path.Combine(backup,"packages")) zip ignore |> ignore)
+    let zip, _ = packageFixture backup "invalid" (fun entries -> Array.append entries [|"BUNDLE/PAYLOAD/HOOK.DLL",[|1uy|]|])
+    rejects (fun () -> RuntimePackages.importZip (Path.Combine(backup,"packages")) zip ignore |> ignore)))
+test "Corrupt or missing package components never enter the version store" (fun () -> tempTest (fun _ backup ->
+    for transform in [ (fun entries -> entries |> Array.filter (fun ((p: string),_) -> not (p.EndsWith("core.dll"))))
+                       (fun entries -> entries |> Array.map (fun ((p: string),b) -> p, if p.EndsWith("core.dll") then [|0uy|] else b)) ] do
+        let zip, _ = packageFixture backup "invalid" transform
+        let store = Path.Combine(backup,"packages")
+        rejects (fun () -> RuntimePackages.importZip store zip ignore |> ignore)
+        equal 0 (RuntimePackages.list store).Length
+        if Directory.Exists(store) then equal 0 (Directory.GetDirectories(store)).Length))
+test "Manifest rejects duplicate targets, malformed checksums and unknown policies" (fun () -> tempTest (fun _ backup ->
+    let _, files = packageFixture backup "fixture" id
+    for bad in [ Array.append files [|{files.[0] with Target="DXGI.DLL"}|]
+                 [|{files.[0] with Hash="123"}|]
+                 [|{files.[0] with Policy="execute"}|]
+                 [|{files.[0] with Target="../game.exe"}|] ] do
+        rejects (fun () -> RuntimePackages.parse (packageJson "bad" bad) |> ignore)))
+test "PE architecture is verified independently from the manifest hash" (fun () -> tempTest (fun _ backup ->
+    let zip, _ = packageFixture backup "wrong-arch" (fun entries ->
+        entries |> Array.map (fun ((p: string),b) -> p, if p.EndsWith("033-package.json") then Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(b).Replace("\"Architecture\":\"x64\"","\"Architecture\":\"x86\"")) else b))
+    rejects (fun () -> RuntimePackages.importZip (Path.Combine(backup,"packages")) zip ignore |> ignore)))
+test "Stored manifest modification cannot silently change a version" (fun () -> tempTest (fun _ backup ->
+    let package = importFixture backup "fixture"
+    File.AppendAllText(Path.Combine(package.Root,"033-package.json"), " ")
+    rejects (fun () -> RuntimePackages.load (Path.Combine(backup,"packages")) package.Id |> ignore)))
+test "Preview has no game writes, preserves seed files and excludes optional components" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        let settings = write (Path.Combine(game,"ReShade.ini")) "user settings"
+        let package = importFixture backup "fixture"
+        let before = Directory.GetFiles(game,"*",SearchOption.AllDirectories) |> Array.map (fun p -> p,hash p)
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        equal [||] preview.Errors
+        equal 3 preview.Rows.Length
+        equal "keep" (preview.Rows |> Array.find (fun r -> r.RelativeTarget = "ReShade.ini")).Action
+        equal false (preview.Rows |> Array.exists (fun r -> r.RelativeTarget = "version.dll"))
+        equal before (Directory.GetFiles(game,"*",SearchOption.AllDirectories) |> Array.map (fun p -> p,hash p))
+        equal "user settings" (File.ReadAllText(settings)))))
+test "Occupied proxy blocks installation; non-hook replacements are shown and backed up" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        let package = importFixture backup "fixture"
+        let hook = write (Path.Combine(game,"dxgi.dll")) "another mod"
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        equal true (preview.Errors |> Array.exists (fun e -> e.Contains("Hook slot")))
+        equal false (ModInstaller.installPackage item package preview (fun _ _ -> ())).Success
+        equal "another mod" (File.ReadAllText(hook)))))
+test "Changed targets, executable and package invalidate reviewed plans before writes" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        let package = importFixture backup "fixture"
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        let settings = write (Path.Combine(game,"ReShade.ini")) "late user config"
+        equal false (ModInstaller.installPackage item package preview (fun _ _ -> ())).Success
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll")))
+        File.Delete(settings)
+        let fresh = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        File.AppendAllText(exe,"game update")
+        equal false (ModInstaller.installPackage item package fresh (fun _ _ -> ())).Success
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll")))
+        let refreshed = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        File.AppendAllText(Path.Combine(package.Root,"payload/core.dll"),"modified")
+        equal false (ModInstaller.installPackage item package refreshed (fun _ _ -> ())).Success
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll"))))))
+test "Package deploy and restore retain original binaries, user settings and unrelated files" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe manifest _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        Directory.CreateDirectory(Path.Combine(game,"033-runtime")) |> ignore
+        let original = write (Path.Combine(game,"033-runtime/core.dll")) "original core"
+        let settings = write (Path.Combine(game,"ReShade.ini")) "my settings"
+        let unrelated = write (Path.Combine(game,"other.dll")) "unrelated"
+        let package = importFixture backup "fixture"
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        equal [||] preview.Errors
+        equal "replace" (preview.Rows |> Array.find (fun r -> r.Target = original)).Action
+        let outcome = ModInstaller.installPackage item package preview (fun _ _ -> ())
+        if not outcome.Success then failwith outcome.Message
+        equal true (File.Exists(manifest))
+        equal "package:legacy-dx12-x64" (ModInstaller.installedMode item)
+        equal true (ModInstaller.inspect item exe [||] [||]).Complete
+        let again = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        equal true (again.Errors.Length > 0)
+        let restore = ModInstaller.uninstall item exe None (fun _ _ -> ())
+        if not restore.Success then failwith restore.Message
+        equal false (File.Exists(manifest))
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll")))
+        equal "original core" (File.ReadAllText(original))
+        equal "my settings" (File.ReadAllText(settings))
+        equal "unrelated" (File.ReadAllText(unrelated)))))
+test "Mid-deployment failure rolls back previous writes and retains no new manifest" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe manifest _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        let package = importFixture backup "fixture"
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        let outcome = ModInstaller.installPackage item package preview (fun _ progress -> if progress > 0.0 then failwith "simulated disk failure")
+        equal false outcome.Success
+        equal false (File.Exists(manifest))
+        equal false (File.Exists(Path.Combine(game,"dxgi.dll"))))))
+test "Existing mirror directories receive runtime files only" (fun () -> tempTest (fun game backup ->
+    withRestorePoint game backup (fun item exe _ _ ->
+        makePe exe 0x8664 true [|"d3d12.dll"|] false |> ignore
+        Directory.CreateDirectory(Path.Combine(game,"_storage_")) |> ignore
+        let package = importFixture backup "fixture"
+        let preview = ModInstaller.previewPackage item exe package "legacy-dx12-x64"
+        equal [||] preview.Errors
+        equal true (preview.Rows |> Array.exists (fun r -> r.RelativeTarget = "_storage_/033-runtime/core.dll"))
+        equal false (preview.Rows |> Array.exists (fun r -> r.RelativeTarget = "_storage_/dxgi.dll")))))
+test "Compatibility explains unknown APIs, bitness mismatch, native DX11 and anti-cheat" (fun () -> tempTest (fun game backup ->
+    let package = importFixture backup "fixture"
+    let exe = makePe (Path.Combine(game,"game.exe")) 0x8664 true [|"d3d12.dll"|] false
+    let facts = PackagePlanning.evidence game exe package
+    let profile = package.Manifest.Profiles.[0]
+    equal 0 (PackagePlanning.assess facts profile).Reasons.Length
+    for invalid in [ {facts with Apis=[||]}; {facts with Architecture="32"}; {facts with AntiCheat=true}; {facts with Apis=[|"vulkan"|]} ] do
+        equal true ((PackagePlanning.assess invalid profile).Reasons.Length > 0)
+    let native = {profile with Apis=[|"dx11"|];NativeUpscaler="present"}
+    equal true ((PackagePlanning.assess {facts with Apis=[|"dx11"|];NativeDlss=true} native).Reasons |> Array.exists (fun r -> r.Contains("unsupported")))))
 
 printfn "\n%d passed, %d failed" passed failed
 if failed > 0 then exit 1

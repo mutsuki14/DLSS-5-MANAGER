@@ -47,3 +47,7 @@ dotnet fsi --exec tests/RegressionTests.fsx
 ```
 
 The checkout does not include the `mod files` runtime payload. Building the manager does not download or manufacture those binaries. Existing upstream authorship and copyright remain unchanged.
+
+### Imported runtime packages (fork development)
+
+Import a schema 1 033 ZIP from the game management window, inspect compatibility evidence, review every planned file change, then confirm deployment. Package versions are stored separately; restore the current installation before selecting another version. See [运行包、适配建议与安装预览](docs/runtime-packages.md) for scope, limitations and validation.
